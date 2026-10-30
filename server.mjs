@@ -5,8 +5,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
-const host = process.env.HOST || '127.0.0.1';
-const port = Number(process.env.PORT) || 4173;
+const host = process.env.HOST || '0.0.0.0';
+const port = process.env.PORT || 4173;
 
 const mime = new Map(Object.entries({
   '.html': 'text/html; charset=utf-8',
