@@ -1,0 +1,13 @@
+{
+  "name": "ourchat",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A polished, zero-dependency ChatGPT-style chat UI for OpenRouter.",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
