@@ -113,6 +113,80 @@
       <div class="composer-wrap" id="composer-wrap">
         <form class="composer" id="composer" autocomplete="off">
           <div class="attachments" id="attachments" hidden></div>
+          <div class="video-options" id="video-options" hidden>
+            <div class="video-options-head">
+              <span class="video-options-title"><svg class="icon"><use href="#i-image"/></svg>Video settings</span>
+              <span class="video-estimate" id="video-estimate"></span>
+            </div>
+            <div class="video-option-grid">
+              <label class="video-option">
+                <span>Aspect ratio</span>
+                <select id="video-aspect" aria-label="Video aspect ratio"></select>
+              </label>
+              <label class="video-option">
+                <span>Duration</span>
+                <select id="video-duration" aria-label="Video duration"></select>
+              </label>
+              <label class="video-option">
+                <span>Resolution</span>
+                <select id="video-resolution" aria-label="Video resolution"></select>
+              </label>
+              <label class="video-audio-toggle" id="video-audio-row">
+                <input type="checkbox" id="video-audio">
+                <span>Generate audio</span>
+              </label>
+            </div>
+            <div class="reference-row" id="video-reference-row">
+              <button type="button" class="chip-btn" id="video-reference-btn" title="Add a reference audio sample">
+                <svg class="icon"><use href="#i-mic"/></svg>
+                <span>Audio sample</span>
+              </button>
+              <span class="reference-chip" id="video-reference-chip" hidden>
+                <span id="video-reference-name"></span>
+                <button type="button" class="reference-clear" id="video-reference-clear" aria-label="Remove audio sample">
+                  <svg class="icon"><use href="#i-x"/></svg>
+                </button>
+              </span>
+              <span class="reference-help">Used by supporting video models.</span>
+            </div>
+          </div>
+          <div class="speech-options" id="speech-options" hidden>
+            <div class="video-options-head">
+              <span class="video-options-title"><svg class="icon"><use href="#i-mic"/></svg>Speech settings</span>
+              <span class="video-estimate" id="speech-estimate"></span>
+            </div>
+            <div class="speech-option-grid">
+              <label class="video-option">
+                <span>Voice</span>
+                <input class="text-input" id="speech-voice" list="speech-voices" placeholder="Provider default" spellcheck="false">
+              </label>
+              <label class="video-option">
+                <span>Speed</span>
+                <input class="text-input" id="speech-speed" type="number" min="0.5" max="2" step="0.05" value="1">
+              </label>
+              <label class="video-option speech-instructions">
+                <span>Delivery</span>
+                <input class="text-input" id="speech-instructions" placeholder="Optional: warm, calm, slightly faster">
+              </label>
+            </div>
+            <div class="reference-row">
+              <button type="button" class="chip-btn" id="speech-reference-btn" title="Add an audio sample to clone a voice">
+                <svg class="icon"><use href="#i-mic"/></svg>
+                <span>Clone from sample</span>
+              </button>
+              <span class="reference-chip" id="speech-reference-chip" hidden>
+                <span id="speech-reference-name"></span>
+                <button type="button" class="reference-clear" id="speech-reference-clear" aria-label="Remove voice sample">
+                  <svg class="icon"><use href="#i-x"/></svg>
+                </button>
+              </span>
+              <span class="reference-help">One sample, up to 12 MB. Supporting models only.</span>
+            </div>
+            <label class="speech-transcript" id="speech-transcript-row" hidden>
+              <span>Sample transcript</span>
+              <textarea class="text-input textarea" id="speech-transcript" rows="2" maxlength="10000" placeholder="Type what the sample says for a closer match."></textarea>
+            </label>
+          </div>
           <label class="sr-only" for="input">Message OURCHAT</label>
           <textarea id="input" rows="1" placeholder="Ask anything" maxlength="32000"></textarea>
           <div class="composer-bar">
@@ -260,6 +334,63 @@
     </div>
   </dialog>
 
+  <dialog class="dialog" id="voiceover-dialog" aria-labelledby="voiceover-title">
+    <form method="dialog" class="dialog-head">
+      <div>
+        <h2 id="voiceover-title">Add voiceover</h2>
+        <p class="dialog-sub">Creates a separate audio track for this video.</p>
+      </div>
+      <button class="icon-btn" value="cancel" aria-label="Close voiceover"><svg class="icon"><use href="#i-x"/></svg></button>
+    </form>
+    <div class="dialog-body">
+      <section class="field-group two-col">
+        <div>
+          <label class="field-label" for="voiceover-model">Speech model</label>
+          <select class="text-input" id="voiceover-model"></select>
+        </div>
+        <div>
+          <label class="field-label" for="voiceover-voice">Voice</label>
+          <input class="text-input" id="voiceover-voice" list="speech-voices" placeholder="Provider default" spellcheck="false">
+        </div>
+      </section>
+      <section class="field-group">
+        <label class="field-label" for="voiceover-script">Script</label>
+        <textarea class="text-input textarea" id="voiceover-script" rows="5" maxlength="32000" placeholder="What should this voiceover say?"></textarea>
+        <p class="field-help">The track is not muxed into the video file; it is saved beside it.</p>
+      </section>
+      <section class="field-group">
+        <label class="field-label" for="voiceover-instructions">Delivery</label>
+        <input class="text-input" id="voiceover-instructions" placeholder="Optional: warm, calm, slightly faster">
+      </section>
+      <section class="field-group">
+        <div class="field-label-row">
+          <span class="field-label">Voice sample</span>
+          <button type="button" class="chip-btn" id="voiceover-reference-btn">
+            <svg class="icon"><use href="#i-mic"/></svg>
+            <span>Add sample</span>
+          </button>
+        </div>
+        <span class="reference-chip" id="voiceover-reference-chip" hidden>
+          <span id="voiceover-reference-name"></span>
+          <button type="button" class="reference-clear" id="voiceover-reference-clear" aria-label="Remove voice sample">
+            <svg class="icon"><use href="#i-x"/></svg>
+          </button>
+        </span>
+        <label class="speech-transcript" id="voiceover-transcript-row" hidden>
+          <span>Sample transcript</span>
+          <textarea class="text-input textarea" id="voiceover-transcript" rows="2" maxlength="10000" placeholder="Type what the sample says for a closer match."></textarea>
+        </label>
+      </section>
+    </div>
+    <div class="dialog-foot">
+      <span class="save-state" id="voiceover-state"></span>
+      <div class="dialog-actions">
+        <button class="btn ghost" value="cancel" formmethod="dialog">Cancel</button>
+        <button class="btn primary" type="button" id="voiceover-generate">Generate voiceover</button>
+      </div>
+    </div>
+  </dialog>
+
   <dialog class="dialog search-dialog" id="search-dialog" aria-labelledby="search-title">
     <div class="search-head">
       <svg class="icon"><use href="#i-search"/></svg>
@@ -277,6 +408,8 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
   <input type="file" id="file-input" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+  <input type="file" id="audio-input" accept="audio/*,.wav,.mp3,.m4a,.ogg,.webm" hidden>
+  <datalist id="speech-voices"></datalist>
 
   <script type="module" src="./js/app.js"></script>
 </body>

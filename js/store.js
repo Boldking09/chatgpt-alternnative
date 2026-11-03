@@ -13,6 +13,14 @@ export const DEFAULT_SETTINGS = {
   showReasoning: true,
   sendOnEnter: true,
   theme: "system",
+  videoDuration: 8,
+  videoResolution: "720p",
+  videoAspectRatio: "16:9",
+  videoAudio: false,
+  speechModel: "mistralai/voxtral-mini-tts-3-0",
+  speechVoice: "",
+  speechSpeed: 1,
+  speechInstructions: "",
 };
 
 function read(key, fallback) {
@@ -53,7 +61,64 @@ function sanitizeSettings(input) {
   settings.showReasoning = settings.showReasoning !== false;
   settings.sendOnEnter = settings.sendOnEnter !== false;
   settings.theme = ["light", "dark", "system"].includes(settings.theme) ? settings.theme : "system";
+  const duration = Number(settings.videoDuration);
+  settings.videoDuration = Number.isFinite(duration) && duration > 0 ? Math.floor(duration) : DEFAULT_SETTINGS.videoDuration;
+  settings.videoResolution = typeof settings.videoResolution === "string" ? settings.videoResolution : DEFAULT_SETTINGS.videoResolution;
+  settings.videoAspectRatio = typeof settings.videoAspectRatio === "string" ? settings.videoAspectRatio : DEFAULT_SETTINGS.videoAspectRatio;
+  settings.videoAudio = settings.videoAudio === true;
+  settings.speechModel = typeof settings.speechModel === "string" ? settings.speechModel : DEFAULT_SETTINGS.speechModel;
+  settings.speechVoice = typeof settings.speechVoice === "string" ? settings.speechVoice : "";
+  const speechSpeed = Number(settings.speechSpeed);
+  settings.speechSpeed = Number.isFinite(speechSpeed) ? Math.min(2, Math.max(0.5, speechSpeed)) : 1;
+  settings.speechInstructions = typeof settings.speechInstructions === "string" ? settings.speechInstructions.slice(0, 2000) : "";
   return settings;
+}
+
+function sanitizeVideo(video) {
+  if (!video || typeof video !== "object" || typeof video.jobId !== "string" || !video.jobId) return null;
+  const cost = Number(video.cost);
+  const estimatedCost = Number(video.estimatedCost);
+  return {
+    jobId: video.jobId,
+    pollingUrl: typeof video.pollingUrl === "string" ? video.pollingUrl : "",
+    status: typeof video.status === "string" ? video.status : "pending",
+    cost: Number.isFinite(cost) && cost >= 0 ? cost : null,
+    estimatedCost: Number.isFinite(estimatedCost) && estimatedCost >= 0 ? estimatedCost : null,
+    expiresAt: Number(video.expiresAt) || null,
+    duration: Number(video.duration) || null,
+    resolution: typeof video.resolution === "string" ? video.resolution : "",
+    aspectRatio: typeof video.aspectRatio === "string" ? video.aspectRatio : "",
+    generateAudio: video.generateAudio === true,
+    error: typeof video.error === "string" ? video.error : "",
+  };
+}
+
+function sanitizeSpeech(speech) {
+  if (!speech || typeof speech !== "object") return null;
+  const bytes = Number(speech.bytes);
+  const estimatedCost = Number(speech.estimatedCost);
+  const status = ["generating", "completed", "failed"].includes(speech.status) ? speech.status : "completed";
+  return {
+    model: typeof speech.model === "string" ? speech.model : "",
+    voice: typeof speech.voice === "string" ? speech.voice : "",
+    format: typeof speech.format === "string" ? speech.format : "mp3",
+    status,
+    bytes: Number.isFinite(bytes) && bytes > 0 ? Math.floor(bytes) : null,
+    estimatedCost: Number.isFinite(estimatedCost) && estimatedCost >= 0 ? estimatedCost : null,
+    referenceName: typeof speech.referenceName === "string" ? speech.referenceName : "",
+    instructions: typeof speech.instructions === "string" ? speech.instructions : "",
+    error: typeof speech.error === "string" ? speech.error : "",
+  };
+}
+
+function sanitizeVoiceover(voiceover) {
+  const base = sanitizeSpeech(voiceover);
+  if (!base) return null;
+  return {
+    ...base,
+    script: typeof voiceover.script === "string" ? voiceover.script : "",
+    at: Number(voiceover.at) || null,
+  };
 }
 
 function sanitizeMessage(message) {
@@ -70,6 +135,9 @@ function sanitizeMessage(message) {
     stopped: Boolean(message.stopped),
     feedback: message.feedback === 1 || message.feedback === -1 ? message.feedback : 0,
     usage: message.usage && typeof message.usage === "object" ? message.usage : null,
+    video: sanitizeVideo(message.video),
+    speech: sanitizeSpeech(message.speech),
+    voiceover: sanitizeVoiceover(message.voiceover),
   };
 }
 
@@ -218,12 +286,12 @@ export function resetSettings() {
 
 export function cachedModels() {
   const cache = read(MODELS_KEY, null);
-  if (!cache || !Array.isArray(cache.models) || !cache.at) return null;
+  if (!cache || cache.version !== 3 || !Array.isArray(cache.models) || !cache.at) return null;
   return { ...cache, stale: Date.now() - cache.at > MODEL_TTL };
 }
 
 export function saveModels(models) {
-  write(MODELS_KEY, { at: Date.now(), models });
+  write(MODELS_KEY, { version: 3, at: Date.now(), models });
 }
 
 export function clearModels() {
@@ -252,6 +320,31 @@ export function exportConversation(conversation) {
     lines.push("");
     if (message.content) lines.push(message.content);
     if (message.images?.length) lines.push("", `_${message.images.length} attached image(s)_`);
+    if (message.speech) {
+      lines.push(
+        "",
+        `_Speech · ${message.speech.model}${
+          message.speech.voice ? ` · voice ${message.speech.voice}` : ""
+        }${message.speech.referenceName ? ` · cloned from ${message.speech.referenceName}` : ""}_`
+      );
+    }
+    if (message.video) {
+      const video = message.video;
+      lines.push(
+        "",
+        `_Video job ${video.jobId} · ${video.status}${video.duration ? ` · ${video.duration}s` : ""}${
+          video.resolution ? ` · ${video.resolution}` : ""
+        }${video.aspectRatio ? ` · ${video.aspectRatio}` : ""}${video.cost != null ? ` · $${video.cost.toFixed(4)}` : ""}_`
+      );
+      if (message.voiceover) {
+        lines.push(
+          "",
+          `_Voiceover · ${message.voiceover.model}${
+            message.voiceover.voice ? ` · voice ${message.voiceover.voice}` : ""
+          }${message.voiceover.error ? ` · ${message.voiceover.error}` : ""}_`
+        );
+      }
+    }
     lines.push("");
   }
   return lines.join("\n").trim() + "\n";

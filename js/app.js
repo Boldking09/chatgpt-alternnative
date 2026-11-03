@@ -1,9 +1,23 @@
 import * as store from "./store.js";
 import { renderMarkdown, escapeHtml, plainText, snippet } from "./markdown.js";
+import { deleteAudio, getAudio, putAudio, clearAudio } from "./audio-store.js";
 import {
   fetchModels,
+  fetchVideoModels,
+  fetchSpeechModels,
   streamCompletion,
   completeChat,
+  createVideoGeneration,
+  createSpeech,
+  speechAudioReference,
+  videoAudioReference,
+  fetchVideoJob,
+  fetchVideoContent,
+  waitForVideoGeneration,
+  videoJobUrls,
+  estimateVideoCost,
+  estimateSpeechCost,
+  formatVideoCost,
   formatContext,
   formatPrice,
   providerOf,
@@ -39,6 +53,43 @@ const dom = {
   searchInput: $("#search-input"),
   searchResults: $("#search-results"),
   fileInput: $("#file-input"),
+  videoOptions: $("#video-options"),
+  videoAspect: $("#video-aspect"),
+  videoDuration: $("#video-duration"),
+  videoResolution: $("#video-resolution"),
+  videoAudio: $("#video-audio"),
+  videoAudioRow: $("#video-audio-row"),
+  videoEstimate: $("#video-estimate"),
+  speechOptions: $("#speech-options"),
+  speechVoice: $("#speech-voice"),
+  speechSpeed: $("#speech-speed"),
+  speechInstructions: $("#speech-instructions"),
+  speechEstimate: $("#speech-estimate"),
+  speechReferenceBtn: $("#speech-reference-btn"),
+  speechReferenceChip: $("#speech-reference-chip"),
+  speechReferenceClear: $("#speech-reference-clear"),
+  speechReferenceName: $("#speech-reference-name"),
+  speechTranscriptRow: $("#speech-transcript-row"),
+  speechTranscript: $("#speech-transcript"),
+  videoReferenceBtn: $("#video-reference-btn"),
+  videoReferenceChip: $("#video-reference-chip"),
+  videoReferenceName: $("#video-reference-name"),
+  videoReferenceClear: $("#video-reference-clear"),
+  audioInput: $("#audio-input"),
+  voiceDatalist: $("#speech-voices"),
+  voiceoverDialog: $("#voiceover-dialog"),
+  voiceoverModel: $("#voiceover-model"),
+  voiceoverVoice: $("#voiceover-voice"),
+  voiceoverScript: $("#voiceover-script"),
+  voiceoverInstructions: $("#voiceover-instructions"),
+  voiceoverReferenceBtn: $("#voiceover-reference-btn"),
+  voiceoverReferenceChip: $("#voiceover-reference-chip"),
+  voiceoverReferenceName: $("#voiceover-reference-name"),
+  voiceoverReferenceClear: $("#voiceover-reference-clear"),
+  voiceoverTranscriptRow: $("#voiceover-transcript-row"),
+  voiceoverTranscript: $("#voiceover-transcript"),
+  voiceoverState: $("#voiceover-state"),
+  voiceoverGenerate: $("#voiceover-generate"),
 };
 
 const state = {
@@ -58,6 +109,19 @@ const state = {
   searchIds: [],
   stick: true,
   listening: false,
+  videoCache: new Map(),
+  videoLoading: new Set(),
+  audioCache: new Map(),
+  audioLoading: new Set(),
+  audioMissing: new Set(),
+  speechReference: null,
+  videoReference: null,
+  voiceoverReference: null,
+  audioTarget: "",
+  voiceoverMessageId: null,
+  voiceoverConversationId: null,
+  voiceoverController: null,
+  voiceoverBusy: false,
 };
 
 const mqDark = matchMedia("(prefers-color-scheme: dark)");
@@ -82,6 +146,11 @@ function modelName(id) {
   if (!id) return "Choose a model";
   const model = state.models.find((item) => item.id === id);
   return model ? model.name : id;
+}
+
+function currentModelInfo() {
+  const id = currentModel();
+  return state.models.find((item) => item.id === id) || null;
 }
 
 function shortModel(id) {
@@ -151,6 +220,15 @@ function slugify(text) {
     .slice(0, 60) || "chat";
 }
 
+function releaseVideoCache(video) {
+  const jobId = video?.jobId;
+  if (!jobId) return;
+  const cached = state.videoCache.get(jobId);
+  if (!cached) return;
+  state.videoCache.delete(jobId);
+  setTimeout(() => URL.revokeObjectURL(cached.url), 0);
+}
+
 function download(text, filename, type = "text/markdown") {
   const blob = new Blob([text], { type: `${type};charset=utf-8` });
   const url = URL.createObjectURL(blob);
@@ -159,6 +237,196 @@ function download(text, filename, type = "text/markdown") {
   anchor.download = filename;
   anchor.click();
   setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+function audioKey(kind, id) {
+  return `${kind}:${id}`;
+}
+
+function releaseAudio(key) {
+  const cached = state.audioCache.get(key);
+  if (cached) {
+    state.audioCache.delete(key);
+    setTimeout(() => URL.revokeObjectURL(cached.url), 0);
+  }
+  state.audioMissing.delete(key);
+  state.audioLoading.delete(key);
+  void deleteAudio(key);
+}
+
+function releaseMessageAudio(message) {
+  if (!message?.id) return;
+  releaseAudio(audioKey("speech", message.id));
+  releaseAudio(audioKey("voiceover", message.id));
+}
+
+function audioExtension(type) {
+  const value = String(type || "").toLowerCase();
+  if (value.includes("wav")) return "wav";
+  if (value.includes("ogg")) return "ogg";
+  if (value.includes("opus")) return "opus";
+  if (value.includes("aac")) return "aac";
+  if (value.includes("flac")) return "flac";
+  if (value.includes("mpeg")) return "mp3";
+  return "mp3";
+}
+
+function playAudioKey(key) {
+  const audio = dom.thread.querySelector(`audio[data-audio-key="${key}"]`);
+  if (!audio) return;
+  audio.play().catch(() => {});
+}
+
+async function loadStoredAudio(kind, messageId) {
+  const key = audioKey(kind, messageId);
+  if (state.audioCache.has(key) || state.audioLoading.has(key) || state.audioMissing.has(key)) return;
+  state.audioLoading.add(key);
+  const stored = await getAudio(key);
+  state.audioLoading.delete(key);
+  if (stored instanceof Blob && stored.size) {
+    state.audioCache.set(key, { url: URL.createObjectURL(stored), blob: stored });
+  } else {
+    state.audioMissing.add(key);
+  }
+  if (state.conversationId) renderThread();
+}
+
+function hydrateAudio() {
+  if (document.hidden) return;
+  const conversation = currentConversation();
+  if (!conversation) return;
+  const pending = conversation.messages
+    .filter((message) => {
+      const speech = message.speech;
+      const voiceover = message.voiceover;
+      return (
+        (speech?.status === "completed" && !speech.error) ||
+        (voiceover?.status === "completed" && !voiceover.error)
+      );
+    })
+    .slice(0, 4);
+  for (const message of pending) {
+    if (message.speech?.status === "completed" && !message.speech.error) {
+      void loadStoredAudio("speech", message.id);
+    }
+    if (message.voiceover?.status === "completed" && !message.voiceover.error) {
+      void loadStoredAudio("voiceover", message.id);
+    }
+  }
+}
+
+function speechModels() {
+  return state.models.filter((model) => model.kind === "speech");
+}
+
+function speechReferences(reference) {
+  if (!reference?.data) return [];
+  const parts = speechAudioReference(reference.data, reference.transcript);
+  return parts || [];
+}
+
+function formatBytes(bytes) {
+  const value = Number(bytes);
+  if (!Number.isFinite(value) || value <= 0) return "";
+  if (value < 1024 * 1024) return `${Math.max(1, Math.round(value / 1024))} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function renderSpeechReference() {
+  const reference = state.speechReference;
+  if (dom.speechReferenceChip) dom.speechReferenceChip.hidden = !reference;
+  if (dom.speechReferenceName) dom.speechReferenceName.textContent = reference?.name || "";
+  if (dom.speechTranscriptRow) dom.speechTranscriptRow.hidden = !reference;
+  if (dom.speechTranscript && reference) dom.speechTranscript.value = reference.transcript || "";
+}
+
+function renderVideoReference() {
+  const reference = state.videoReference;
+  if (dom.videoReferenceChip) dom.videoReferenceChip.hidden = !reference;
+  if (dom.videoReferenceName) dom.videoReferenceName.textContent = reference?.name || "";
+}
+
+function renderVoiceoverReference() {
+  const reference = state.voiceoverReference;
+  if (dom.voiceoverReferenceChip) dom.voiceoverReferenceChip.hidden = !reference;
+  if (dom.voiceoverReferenceName) dom.voiceoverReferenceName.textContent = reference?.name || "";
+  if (dom.voiceoverTranscriptRow) dom.voiceoverTranscriptRow.hidden = !reference;
+  if (dom.voiceoverTranscript && reference) dom.voiceoverTranscript.value = reference.transcript || "";
+}
+
+function readAudioSample(file) {
+  return new Promise((resolve, reject) => {
+    if (!file) {
+      reject(new Error("Choose an audio file."));
+      return;
+    }
+    const name = String(file.name || "").toLowerCase();
+    const audio = file.type.startsWith("audio/") || /\.(wav|mp3|m4a|aac|ogg|opus|webm|flac)$/.test(name);
+    if (!audio) {
+      reject(new Error("Choose an audio file such as WAV, MP3, M4A, or OGG."));
+      return;
+    }
+    if (file.size > 12 * 1024 * 1024) {
+      reject(new Error("Audio samples must be smaller than 12 MB."));
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result !== "string" || !reader.result.startsWith("data:audio/")) {
+        reject(new Error("That audio file could not be read."));
+        return;
+      }
+      resolve({ data: reader.result, name: file.name || "Audio sample", size: file.size, type: file.type });
+    };
+    reader.onerror = () => reject(new Error("That audio file could not be read."));
+    reader.readAsDataURL(file);
+  });
+}
+
+function chooseAudioSample(target) {
+  state.audioTarget = target;
+  dom.audioInput.value = "";
+  dom.audioInput.click();
+}
+
+async function applyAudioSample(file) {
+  const target = state.audioTarget;
+  state.audioTarget = "";
+  if (!file || !target) return;
+  try {
+    const sample = await readAudioSample(file);
+    if (target === "speech") {
+      state.speechReference = sample;
+      renderSpeechReference();
+      updateSpeechEstimate();
+    } else if (target === "video") {
+      state.videoReference = sample;
+      renderVideoReference();
+    } else if (target === "voiceover") {
+      state.voiceoverReference = sample;
+      renderVoiceoverReference();
+    }
+    toast(`Added ${sample.name}`);
+  } catch (error) {
+    toast(error.message || "That audio file could not be used.");
+  }
+}
+
+function fillVoiceDatalist() {
+  if (!dom.voiceDatalist) return;
+  const voices = [...new Set(speechModels().flatMap((model) => model.voices || []))].sort();
+  dom.voiceDatalist.innerHTML = voices
+    .map((voice) => `<option value="${escapeHtml(voice)}"></option>`)
+    .join("");
 }
 
 /* ---------------- Theme ---------------- */
@@ -196,20 +464,217 @@ function updateTopbar() {
   dom.modelPickerName.textContent = modelName(id);
   dom.modelPickerName.title = id;
   const model = state.models.find((item) => item.id === id);
-  dom.modelBadge.hidden = !model?.vision;
+  const video = model?.kind === "video";
+  const speech = model?.kind === "speech";
+  dom.modelBadge.hidden = !model?.vision && !video && !speech;
+  dom.modelBadge.textContent = video ? "video" : speech ? "speech" : "vision";
+  dom.modelBadge.classList.toggle("video", video);
+  dom.modelBadge.classList.toggle("speech", speech);
 }
 
 function updateChrome() {
   updateTopbar();
   updatePromptLabel();
   updateAccount();
+  syncVideoOptions();
+  syncSpeechOptions();
 }
 
 function updateTokenHint() {
+  if (["video", "speech"].includes(currentModelInfo()?.kind)) {
+    dom.tokenHint.textContent = "";
+    return;
+  }
   const chars = dom.input.value.length;
   const images = state.pendingImages.length;
   const tokens = Math.ceil(chars / 4) + images * 780;
   dom.tokenHint.textContent = tokens >= 160 ? `~${tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : tokens} tokens` : "";
+}
+
+function nearestValue(values, value) {
+  const number = Number(value);
+  if (!values.length) return Number.isFinite(number) ? number : 0;
+  if (!Number.isFinite(number)) return values[0];
+  return values.reduce((best, item) => (Math.abs(item - number) < Math.abs(best - number) ? item : best), values[0]);
+}
+
+function clampVideoOptions(model, input = {}) {
+  const settings = store.settings();
+  const durations = Array.isArray(model?.durations) ? model.durations : [];
+  const resolutions = Array.isArray(model?.resolutions) ? model.resolutions : [];
+  const aspectRatios = Array.isArray(model?.aspectRatios) ? model.aspectRatios : [];
+
+  const duration = durations.length
+    ? nearestValue(durations, input.duration ?? settings.videoDuration)
+    : Number(input.duration) || Number(settings.videoDuration) || 8;
+
+  let resolution = input.resolution ?? settings.videoResolution;
+  if (!resolutions.includes(resolution)) {
+    resolution = resolutions.includes("720p") ? "720p" : resolutions[0] || "720p";
+  }
+
+  let aspectRatio = input.aspectRatio ?? settings.videoAspectRatio;
+  if (!aspectRatios.includes(aspectRatio)) {
+    aspectRatio = aspectRatios.includes("16:9") ? "16:9" : aspectRatios[0] || "16:9";
+  }
+
+  return {
+    duration,
+    resolution,
+    aspectRatio,
+    generateAudio: Boolean(model?.generateAudio) && Boolean(input.generateAudio),
+  };
+}
+
+function videoOptionsFromControls() {
+  const model = currentModelInfo();
+  if (model?.kind !== "video") return null;
+  return clampVideoOptions(model, {
+    duration: dom.videoDuration?.value,
+    resolution: dom.videoResolution?.value,
+    aspectRatio: dom.videoAspect?.value,
+    generateAudio: dom.videoAudio?.checked,
+  });
+}
+
+function fillVideoSelect(select, values, label) {
+  if (!select) return;
+  select.innerHTML = values
+    .map((value) => `<option value="${escapeHtml(String(value))}">${escapeHtml(label(value))}</option>`)
+    .join("");
+}
+
+function updateVideoEstimate(options = videoOptionsFromControls()) {
+  const model = currentModelInfo();
+  if (!dom.videoEstimate) return;
+  if (model?.kind !== "video" || !options) {
+    dom.videoEstimate.textContent = "";
+    dom.videoEstimate.title = "";
+    return;
+  }
+  const cost = estimateVideoCost(model, options);
+  dom.videoEstimate.textContent = cost === null ? "" : `Est. ${formatVideoCost(cost)}`;
+  dom.videoEstimate.title = cost === null
+    ? "Pricing is not published for this model."
+    : `Estimated for ${options.duration}s at ${options.resolution}${options.generateAudio ? " with audio" : ""}. Final cost may differ.`;
+}
+
+function syncVideoOptions() {
+  if (!dom.videoOptions) return;
+  const model = currentModelInfo();
+  const video = model?.kind === "video";
+  dom.videoOptions.hidden = !video;
+
+  if (!video) {
+    dom.videoOptions.dataset.signature = "";
+    updateVideoEstimate(null);
+    return;
+  }
+
+  const durations = model.durations?.length ? model.durations : [Number(store.settings().videoDuration) || 8];
+  const resolutions = model.resolutions?.length ? model.resolutions : [store.settings().videoResolution || "720p"];
+  const aspectRatios = model.aspectRatios?.length ? model.aspectRatios : [store.settings().videoAspectRatio || "16:9"];
+  const signature = [model.id, durations.join(","), resolutions.join(","), aspectRatios.join(","), Boolean(model.generateAudio)].join("|");
+
+  if (dom.videoOptions.dataset.signature !== signature) {
+    fillVideoSelect(dom.videoAspect, aspectRatios, (value) => value);
+    fillVideoSelect(dom.videoDuration, durations, (value) => `${value}s`);
+    fillVideoSelect(dom.videoResolution, resolutions, (value) => value);
+    dom.videoOptions.dataset.signature = signature;
+  }
+
+  const options = clampVideoOptions(model, {
+    duration: dom.videoDuration?.value,
+    resolution: dom.videoResolution?.value,
+    aspectRatio: dom.videoAspect?.value,
+    generateAudio: Boolean(dom.videoAudio?.checked) || Boolean(store.settings().videoAudio),
+  });
+
+  if (dom.videoDuration) dom.videoDuration.value = String(options.duration);
+  if (dom.videoResolution) dom.videoResolution.value = options.resolution;
+  if (dom.videoAspect) dom.videoAspect.value = options.aspectRatio;
+  if (dom.videoAudioRow) dom.videoAudioRow.hidden = !model.generateAudio;
+  if (dom.videoAudio) dom.videoAudio.checked = options.generateAudio;
+
+  const settings = store.settings();
+  if (
+    settings.videoDuration !== options.duration ||
+    settings.videoResolution !== options.resolution ||
+    settings.videoAspectRatio !== options.aspectRatio ||
+    settings.videoAudio !== options.generateAudio
+  ) {
+    store.saveSettings({
+      videoDuration: options.duration,
+      videoResolution: options.resolution,
+      videoAspectRatio: options.aspectRatio,
+      videoAudio: options.generateAudio,
+    });
+  }
+  updateVideoEstimate(options);
+}
+
+function clampSpeechSpeed(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 1;
+  return Math.min(2, Math.max(0.5, Math.round(number * 100) / 100));
+}
+
+function speechOptionsFromControls() {
+  const model = currentModelInfo();
+  if (model?.kind !== "speech") return null;
+  return {
+    voice: dom.speechVoice?.value.trim() || "",
+    speed: clampSpeechSpeed(dom.speechSpeed?.value),
+    instructions: dom.speechInstructions?.value.trim() || "",
+    reference: state.speechReference,
+  };
+}
+
+function updateSpeechEstimate() {
+  if (!dom.speechEstimate) return;
+  const model = currentModelInfo();
+  if (model?.kind !== "speech") {
+    dom.speechEstimate.textContent = "";
+    dom.speechEstimate.title = "";
+    return;
+  }
+  const cost = estimateSpeechCost(model, dom.input.value);
+  dom.speechEstimate.textContent = cost === null ? "" : `Est. ${formatVideoCost(cost)}`;
+  dom.speechEstimate.title = cost === null
+    ? "Pricing is not published for this model."
+    : "Estimated from the text length. Final cost may differ.";
+}
+
+function syncSpeechOptions() {
+  if (!dom.speechOptions) return;
+  const model = currentModelInfo();
+  const speech = model?.kind === "speech";
+  dom.speechOptions.hidden = !speech;
+  fillVoiceDatalist();
+
+  const attach = $("#attach-btn");
+  if (attach) attach.disabled = speech || model?.kind === "video";
+  if (speech) dom.input.placeholder = "Type the words to speak";
+  else if (model?.kind === "video") dom.input.placeholder = "Describe the video you want to generate";
+  else dom.input.placeholder = "Ask anything";
+
+  if (!speech) {
+    dom.speechOptions.dataset.model = "";
+    updateSpeechEstimate();
+    return;
+  }
+
+  if (dom.speechOptions.dataset.model !== model.id) {
+    dom.speechOptions.dataset.model = model.id;
+    const settings = store.settings();
+    const voice = settings.speechVoice && (!model.voices?.length || model.voices.includes(settings.speechVoice))
+      ? settings.speechVoice
+      : model.voices?.[0] || "";
+    if (dom.speechVoice) dom.speechVoice.value = voice;
+    if (dom.speechSpeed) dom.speechSpeed.value = String(settings.speechSpeed);
+    if (dom.speechInstructions) dom.speechInstructions.value = settings.speechInstructions;
+  }
+  updateSpeechEstimate();
 }
 
 function updateComposerState() {
@@ -221,9 +686,11 @@ function updateComposerState() {
     dom.send.setAttribute("aria-label", "Stop generating");
     dom.send.title = "Stop generating";
   } else {
+    const speech = currentModelInfo()?.kind === "speech";
+    const label = speech ? "Generate speech" : "Send message";
     dom.send.disabled = !hasContent;
-    dom.send.setAttribute("aria-label", "Send message");
-    dom.send.title = "Send message";
+    dom.send.setAttribute("aria-label", label);
+    dom.send.title = label;
   }
   updateTokenHint();
 }
@@ -377,6 +844,7 @@ function handleMenuAction(action, id) {
   }
   if (action === "delete") {
     if (!confirm(`Delete “${conversation.title}”? This cannot be undone.`)) return;
+    for (const message of conversation.messages) releaseVideoCache(message.video);
     store.removeConversation(id);
     if (state.conversationId === id) {
       navigate("#/new");
@@ -421,9 +889,10 @@ function renderModels() {
     })
     .sort((a, b) => a.name.localeCompare(b.name));
 
-  dom.modelsState.textContent = query
+  const countLabel = query
     ? `${filtered.length} of ${state.models.length} models`
     : `${state.models.length} models`;
+  dom.modelsState.textContent = state.modelsError ? `${countLabel} · catalog warning` : countLabel;
 
   if (!filtered.length) {
     dom.modelsList.innerHTML = `<div class="models-empty">No models match “${escapeHtml(state.modelFilter)}”.</div>`;
@@ -442,10 +911,16 @@ function renderModels() {
     html.push(`<div class="models-section">${escapeHtml(provider)}</div>`);
     for (const model of models) {
       const tags = [
+        model.kind === "video" ? `<span class="tag video">Video</span>` : "",
+        model.kind === "video" && model.generateAudio ? `<span class="tag">Audio</span>` : "",
+        model.kind === "speech" ? `<span class="tag speech">Speech</span>` : "",
+        model.kind === "speech" && model.cloning ? `<span class="tag">Cloning</span>` : "",
         model.vision ? `<span class="tag">Vision</span>` : "",
         model.reasoning ? `<span class="tag">Reasoning</span>` : "",
       ].join("");
-      const meta = [formatContext(model.context), formatPrice(model)].filter(Boolean).join(" · ");
+      const meta = model.kind === "video" || model.kind === "speech"
+        ? formatPrice(model)
+        : [formatContext(model.context), formatPrice(model)].filter(Boolean).join(" · ");
       html.push(`<button type="button" class="model-row${model.id === selected ? " selected" : ""}" data-model-id="${escapeHtml(model.id)}">
         <span class="model-info">
           <span class="model-name">${escapeHtml(model.name)}</span>
@@ -468,25 +943,59 @@ async function loadModels(force = false) {
   if (!force && !state.models.length && cache && !cache.stale) {
     state.models = cache.models;
     renderModels();
-    updateTopbar();
+    updateChrome();
     return;
   }
   state.modelsLoading = true;
   state.modelsError = "";
   renderModels();
   if (force) dom.modelsState.textContent = "Refreshing…";
-  try {
-    const models = await fetchModels(store.settings().apiKey);
-    state.models = models;
-    store.saveModels(models);
-    state.modelsError = "";
-  } catch (error) {
-    state.modelsError = error.message || "Could not load models.";
-  } finally {
+
+  const cachedVideo = state.models.filter((model) => model.kind === "video");
+  const cachedSpeech = state.models.filter((model) => model.kind === "speech");
+  const [chatResult, videoResult, speechResult] = await Promise.allSettled([
+    fetchModels(store.settings().apiKey),
+    fetchVideoModels(store.settings().apiKey),
+    fetchSpeechModels(store.settings().apiKey),
+  ]);
+
+  if (chatResult.status === "rejected") {
     state.modelsLoading = false;
+    state.modelsError = chatResult.reason?.message || "Could not load models.";
     renderModels();
-    updateTopbar();
+    updateChrome();
+    return;
   }
+
+  const merged = new Map(chatResult.value.map((model) => [model.id, model]));
+  const warnings = [];
+
+  let videoModels = cachedVideo;
+  if (videoResult.status === "fulfilled" && videoResult.value.length) {
+    videoModels = videoResult.value;
+  } else if (videoResult.status === "rejected") {
+    warnings.push(videoResult.reason?.message || "Video models could not be loaded.");
+  } else {
+    warnings.push("OpenRouter returned no video models.");
+  }
+  for (const model of videoModels) merged.set(model.id, model);
+
+  let speechCatalog = cachedSpeech;
+  if (speechResult.status === "fulfilled" && speechResult.value.length) {
+    speechCatalog = speechResult.value;
+  } else if (speechResult.status === "rejected") {
+    warnings.push(speechResult.reason?.message || "Speech models could not be loaded.");
+  } else {
+    warnings.push("OpenRouter returned no speech models.");
+  }
+  for (const model of speechCatalog) merged.set(model.id, model);
+
+  state.models = [...merged.values()];
+  state.modelsError = warnings.join(" ");
+  state.modelsLoading = false;
+  if (!warnings.length) store.saveModels(state.models);
+  renderModels();
+  updateChrome();
 }
 
 function openModels(mode = "chat") {
@@ -510,16 +1019,282 @@ function selectModel(id) {
     return;
   }
 
-  store.saveSettings({ defaultModel: id });
+  const chosen = state.models.find((item) => item.id === id);
+  const patch = { defaultModel: id };
+  if (chosen?.kind === "speech") patch.speechModel = id;
+  store.saveSettings(patch);
   const conversation = currentConversation();
   if (conversation) store.updateConversation(conversation.id, { model: id });
   state.pendingDefaultModel = id;
   dom.modelsDialog.close();
   updateChrome();
-  toast(`Model set to ${shortModel(id)}`);
+  updateComposerState();
+  if (chosen?.kind === "video" && state.pendingImages.length) {
+    toast("Video models accept text prompts only — attachments will not be sent.");
+  } else if (chosen?.kind === "speech" && state.pendingImages.length) {
+    toast("Speech models accept text only — attachments will not be sent.");
+  } else {
+    toast(`Model set to ${shortModel(id)}`);
+  }
 }
 
 /* ---------------- Messages ---------------- */
+
+const VIDEO_STATUS_LABELS = {
+  pending: "Queued",
+  in_progress: "Rendering",
+  completed: "Ready",
+  failed: "Failed",
+  cancelled: "Cancelled",
+  expired: "Expired",
+};
+
+function jobError(job) {
+  const error = job?.error;
+  if (!error) return "";
+  if (typeof error === "string") return error;
+  if (typeof error.message === "string") return error.message;
+  try {
+    return JSON.stringify(error).slice(0, 400);
+  } catch {
+    return "The video job reported an error.";
+  }
+}
+
+function mergeVideoJob(video, job) {
+  const cost = Number(job?.usage?.cost);
+  const expires = Number(job?.expires_at);
+  return {
+    ...video,
+    jobId: typeof job?.id === "string" && job.id ? job.id : video.jobId,
+    pollingUrl: typeof job?.polling_url === "string" && job.polling_url ? job.polling_url : video.pollingUrl,
+    status: typeof job?.status === "string" && job.status ? job.status : video.status,
+    cost: Number.isFinite(cost) && cost >= 0 ? cost : video.cost,
+    expiresAt: Number.isFinite(expires) && expires > 0 ? expires : video.expiresAt,
+    error: jobError(job),
+  };
+}
+
+function videoCardHtml(message) {
+  const video = message.video;
+  const cached = state.videoCache.get(video.jobId);
+  const busy = state.videoLoading.has(video.jobId);
+  const label = VIDEO_STATUS_LABELS[video.status] || "Working";
+  const detail = [video.duration ? `${video.duration}s` : "", video.resolution, video.aspectRatio, video.generateAudio ? "audio" : ""]
+    .filter(Boolean)
+    .join(" · ");
+  const cost = Number(video.cost) > 0
+    ? formatVideoCost(video.cost)
+    : Number(video.estimatedCost) > 0
+      ? `est. ${formatVideoCost(video.estimatedCost)}`
+      : "";
+
+  let stage = "";
+  if (cached) {
+    stage = `<video class="video-player" src="${cached.url}" controls playsinline preload="metadata"></video>`;
+  } else if (video.status === "completed" && video.error) {
+    stage = `<div class="video-placeholder failed"><svg class="icon"><use href="#i-x"/></svg><span>Video ready, but the file could not be loaded.</span></div>`;
+  } else if (video.status === "completed") {
+    stage = `<div class="video-placeholder"><span class="spinner"></span><span>Loading video…</span></div>`;
+  } else if (["failed", "cancelled", "expired"].includes(video.status)) {
+    stage = `<div class="video-placeholder failed"><svg class="icon"><use href="#i-x"/></svg><span>${escapeHtml(label)}</span></div>`;
+  } else {
+    stage = `<div class="video-placeholder"><span class="spinner"></span><span>${escapeHtml(label)}…</span><small>This can take a few minutes.</small></div>`;
+  }
+
+  const error = video.error
+    ? `<div class="msg-error video-error"><svg class="icon"><use href="#i-x"/></svg><span>${escapeHtml(video.error)}</span></div>`
+    : "";
+
+  const refresh = cached
+    ? ""
+    : `<button type="button" class="chip-btn" data-video-refresh="${message.id}"${busy ? " disabled" : ""}>
+        <svg class="icon"><use href="#i-refresh"/></svg><span>${busy ? "Checking…" : "Check status"}</span>
+      </button>`;
+  const downloadButton = cached
+    ? `<a class="chip-btn" href="${cached.url}" download="ourchat-${escapeHtml(video.jobId)}.mp4">
+        <svg class="icon"><use href="#i-download"/></svg><span>Download</span>
+      </a>`
+    : `<button type="button" class="chip-btn" disabled><svg class="icon"><use href="#i-download"/></svg><span>Download</span></button>`;
+  const voiceoverBusy = message.voiceover?.status === "generating" || state.voiceoverBusy;
+  const voiceoverButton = cached && speechModels().length
+    ? `<button type="button" class="chip-btn" data-voiceover="${message.id}"${voiceoverBusy ? " disabled" : ""}>
+        <svg class="icon"><use href="#i-mic"/></svg><span>${message.voiceover ? "Redo voiceover" : "Add voiceover"}</span>
+      </button>`
+    : "";
+  const voiceover = voiceoverCardHtml(message);
+
+  return `<div class="video-card" data-video-message="${message.id}" data-video-job="${escapeHtml(video.jobId)}">
+    <div class="video-stage">${stage}</div>
+    <div class="video-info">
+      <div class="video-status">
+        <span class="video-status-label${video.status === "failed" ? " error" : ""}">${escapeHtml(label)}</span>
+        <span class="video-status-detail">${escapeHtml(detail)}</span>
+        ${cost ? `<span class="video-cost">${escapeHtml(cost)}</span>` : ""}
+      </div>
+      <div class="video-actions">${refresh}${downloadButton}${voiceoverButton}</div>
+      ${voiceover}
+    </div>
+    ${error}
+  </div>`;
+}
+
+function speechCardHtml(message) {
+  const speech = message.speech;
+  if (!speech) return "";
+  const key = audioKey("speech", message.id);
+  const cached = state.audioCache.get(key);
+  const loading = state.audioLoading.has(key);
+  const missing = state.audioMissing.has(key);
+  const failed = speech.status === "failed" || Boolean(speech.error);
+  const detail = [
+    speech.voice ? `Voice ${speech.voice}` : "",
+    speech.format ? speech.format.toUpperCase() : "",
+    formatBytes(speech.bytes),
+    speech.referenceName ? `cloned from ${speech.referenceName}` : "",
+    Number(speech.estimatedCost) > 0 ? `est. ${formatVideoCost(speech.estimatedCost)}` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  let stage = "";
+  if (cached) {
+    stage = `<audio class="audio-player" src="${cached.url}" data-audio-key="${key}" controls preload="metadata"></audio>`;
+  } else if (failed) {
+    stage = `<div class="audio-placeholder failed"><svg class="icon"><use href="#i-x"/></svg><span>${escapeHtml(speech.error || "Speech generation failed.")}</span></div>`;
+  } else if (loading || speech.status === "generating") {
+    stage = `<div class="audio-placeholder"><span class="spinner"></span><span>Generating speech…</span></div>`;
+  } else if (missing) {
+    stage = `<div class="audio-placeholder failed"><svg class="icon"><use href="#i-x"/></svg><span>Audio file is not available.</span></div>`;
+  } else {
+    stage = `<div class="audio-placeholder"><span class="spinner"></span><span>Loading audio…</span></div>`;
+  }
+
+  const download = cached
+    ? `<a class="chip-btn" href="${cached.url}" download="ourchat-speech-${escapeHtml(message.id)}.${escapeHtml(speech.format || "mp3")}">
+        <svg class="icon"><use href="#i-download"/></svg><span>Download audio</span>
+      </a>`
+    : "";
+
+  return `<div class="audio-card">
+    <div class="audio-stage">${stage}</div>
+    <div class="audio-info">
+      <div class="audio-title"><svg class="icon"><use href="#i-mic"/></svg><span>Speech</span></div>
+      <div class="audio-detail">${escapeHtml(detail || "Generated audio")}</div>
+      ${download ? `<div class="audio-actions">${download}</div>` : ""}
+    </div>
+  </div>`;
+}
+
+function voiceoverCardHtml(message) {
+  const voiceover = message.voiceover;
+  if (!voiceover) return "";
+  const key = audioKey("voiceover", message.id);
+  const cached = state.audioCache.get(key);
+  const loading = state.audioLoading.has(key);
+  const missing = state.audioMissing.has(key);
+  const failed = voiceover.status === "failed" || Boolean(voiceover.error);
+  const detail = [
+    voiceover.voice ? `Voice ${voiceover.voice}` : "",
+    voiceover.format ? voiceover.format.toUpperCase() : "",
+    formatBytes(voiceover.bytes),
+    voiceover.referenceName ? `cloned from ${voiceover.referenceName}` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  let stage = "";
+  if (cached) {
+    stage = `<audio class="audio-player compact" src="${cached.url}" data-audio-key="${key}" controls preload="metadata"></audio>`;
+  } else if (failed) {
+    stage = `<div class="audio-placeholder failed"><svg class="icon"><use href="#i-x"/></svg><span>${escapeHtml(voiceover.error || "Voiceover failed.")}</span></div>`;
+  } else if (loading || voiceover.status === "generating") {
+    stage = `<div class="audio-placeholder"><span class="spinner"></span><span>Generating voiceover…</span></div>`;
+  } else if (missing) {
+    stage = `<div class="audio-placeholder failed"><svg class="icon"><use href="#i-x"/></svg><span>Voiceover file is not available.</span></div>`;
+  } else {
+    stage = `<div class="audio-placeholder"><span class="spinner"></span><span>Loading voiceover…</span></div>`;
+  }
+
+  const download = cached
+    ? `<a class="chip-btn" href="${cached.url}" download="ourchat-voiceover-${escapeHtml(message.id)}.${escapeHtml(voiceover.format || "mp3")}">
+        <svg class="icon"><use href="#i-download"/></svg><span>Download track</span>
+      </a>`
+    : "";
+
+  return `<div class="audio-card voiceover-card">
+    <div class="audio-stage">${stage}</div>
+    <div class="audio-info">
+      <div class="audio-title"><svg class="icon"><use href="#i-mic"/></svg><span>Voiceover</span><small>separate track</small></div>
+      <div class="audio-detail">${escapeHtml(detail || "Generated voiceover")}</div>
+      ${download ? `<div class="audio-actions">${download}</div>` : ""}
+    </div>
+    ${voiceover.error && cached ? `<div class="audio-note">${escapeHtml(voiceover.error)}</div>` : ""}
+  </div>`;
+}
+
+async function refreshVideoAsset(messageId, { notify = false } = {}) {
+  const conversationId = state.conversationId;
+  const conversation = currentConversation();
+  const message = conversation?.messages.find((item) => item.id === messageId);
+  const video = message?.video;
+  if (!conversation || !video?.jobId) return;
+  if (state.videoCache.has(video.jobId) || state.videoLoading.has(video.jobId)) return;
+
+  state.videoLoading.add(video.jobId);
+  store.updateMessage(conversationId, messageId, { video: { ...video, error: "" } });
+  if (state.conversationId === conversationId) renderThread();
+
+  let next = { ...video, error: "" };
+  try {
+    const job = await fetchVideoJob({
+      apiKey: store.settings().apiKey,
+      id: video.jobId,
+      pollingUrl: video.pollingUrl,
+    });
+    next = mergeVideoJob(video, job);
+    if (next.status === "completed") {
+      const url = videoJobUrls(job)[0];
+      if (!url) throw new Error("The job completed without a video URL.");
+      const blob = await fetchVideoContent({ apiKey: store.settings().apiKey, url });
+      const objectUrl = URL.createObjectURL(blob);
+      state.videoCache.set(video.jobId, { url: objectUrl, blob, createdAt: Date.now() });
+    }
+    store.updateMessage(conversationId, messageId, { video: { ...next, error: "" } });
+    if (notify) {
+      if (next.status === "completed") toast("Video is ready");
+      else if (["failed", "cancelled", "expired"].includes(next.status)) toast(`Video ${next.status}`);
+      else toast("Still rendering");
+    }
+  } catch (error) {
+    next = { ...next, error: friendlyError(error) };
+    store.updateMessage(conversationId, messageId, { video: next });
+    if (notify) toast(next.error);
+  } finally {
+    state.videoLoading.delete(video.jobId);
+    if (state.conversationId === conversationId) {
+      renderThread();
+      updateComposerState();
+    }
+  }
+}
+
+function hydrateVideos() {
+  if (document.hidden || state.sending) return;
+  const conversation = currentConversation();
+  if (!conversation) return;
+  const pending = conversation.messages
+    .filter(
+      (message) =>
+        message.video?.status === "completed" &&
+        message.video.jobId &&
+        !message.video.error &&
+        !state.videoCache.has(message.video.jobId) &&
+        !state.videoLoading.has(message.video.jobId)
+    )
+    .slice(0, 3);
+  for (const message of pending) refreshVideoAsset(message.id);
+}
 
 function assistantMessageHtml(message, context) {
   const reasoning = store.settings().showReasoning && message.reasoning
@@ -532,48 +1307,59 @@ function assistantMessageHtml(message, context) {
   let body = "";
   if (message.content) {
     body = `<div class="msg-body">${renderMarkdown(message.content)}</div>`;
-  } else if (context.streaming) {
+  } else if (context.streaming && !message.video && !message.speech) {
     body = `<div class="msg-body"><div class="typing"><i></i><i></i><i></i></div></div>`;
-  } else if (!message.error) {
+  } else if (!message.error && !message.video && !message.speech) {
     body = `<div class="msg-body"><p class="muted-line">No response.</p></div>`;
   }
 
-  const error = message.error
+  const speech = message.speech ? speechCardHtml(message) : "";
+  const video = message.video ? videoCardHtml(message) : "";
+  const error = message.error && !message.video
     ? `<div class="msg-error"><svg class="icon"><use href="#i-x"/></svg><span>${escapeHtml(message.error)}</span></div>`
     : "";
 
   const metaBits = [];
   if (message.model) metaBits.push(escapeHtml(shortModel(message.model)));
-  if (Number(message.usage?.total_tokens) > 0) {
+  if (!message.video && !message.speech && Number(message.usage?.total_tokens) > 0) {
     metaBits.push(`${Number(message.usage.total_tokens).toLocaleString()} tokens`);
   }
-  if (Number(message.usage?.cost) > 0) metaBits.push(`$${Number(message.usage.cost).toFixed(4)}`);
-  if (message.stopped) metaBits.push("stopped");
+  if (!message.video && !message.speech && Number(message.usage?.cost) > 0) metaBits.push(`$${Number(message.usage.cost).toFixed(4)}`);
+  if (message.speech) {
+    if (formatBytes(message.speech.bytes)) metaBits.push(formatBytes(message.speech.bytes));
+    if (Number(message.speech.estimatedCost) > 0) metaBits.push(`est. ${formatVideoCost(message.speech.estimatedCost)}`);
+  }
+  if (!message.video && !message.speech && message.stopped) metaBits.push("stopped");
   const meta = metaBits.length ? `<div class="msg-meta">${metaBits.join(" · ")}</div>` : "";
 
-  const actions = context.streaming
+  const feedback = message.video || message.speech
     ? ""
-    : `<div class="msg-actions">
-        <button type="button" class="icon-btn" data-action="copy" title="Copy" aria-label="Copy response">
-          <svg class="icon"><use href="#i-copy"/></svg>
-        </button>
-        <span class="divider"></span>
-        <button type="button" class="icon-btn${message.feedback === 1 ? " on" : ""}" data-action="up" title="Good response" aria-label="Good response" aria-pressed="${message.feedback === 1}">
-          <svg class="icon"><use href="#i-thumb-up"/></svg>
-        </button>
-        <button type="button" class="icon-btn${message.feedback === -1 ? " on" : ""}" data-action="down" title="Bad response" aria-label="Bad response" aria-pressed="${message.feedback === -1}">
-          <svg class="icon"><use href="#i-thumb-down"/></svg>
-        </button>
-        ${context.lastAssistant ? `<button type="button" class="icon-btn" data-action="regen" title="Regenerate" aria-label="Regenerate response">
-          <svg class="icon"><use href="#i-refresh"/></svg>
-        </button>` : ""}
-      </div>`;
+    : `<button type="button" class="icon-btn" data-action="copy" title="Copy" aria-label="Copy response">
+        <svg class="icon"><use href="#i-copy"/></svg>
+      </button>
+      <span class="divider"></span>
+      <button type="button" class="icon-btn${message.feedback === 1 ? " on" : ""}" data-action="up" title="Good response" aria-label="Good response" aria-pressed="${message.feedback === 1}">
+        <svg class="icon"><use href="#i-thumb-up"/></svg>
+      </button>
+      <button type="button" class="icon-btn${message.feedback === -1 ? " on" : ""}" data-action="down" title="Bad response" aria-label="Bad response" aria-pressed="${message.feedback === -1}">
+        <svg class="icon"><use href="#i-thumb-down"/></svg>
+      </button>`;
+  const regen = context.lastAssistant
+    ? `<button type="button" class="icon-btn" data-action="regen" title="Regenerate" aria-label="Regenerate response">
+        <svg class="icon"><use href="#i-refresh"/></svg>
+      </button>`
+    : "";
+  const actions = context.streaming || (!feedback && !regen)
+    ? ""
+    : `<div class="msg-actions">${feedback}${regen}</div>`;
 
   return `<div class="message assistant" data-id="${message.id}">
     <div class="assistant-avatar"><svg class="icon"><use href="#i-spark"/></svg></div>
     <div class="msg-main">
       ${reasoning}
       ${body}
+      ${speech}
+      ${video}
       ${error}
       ${meta}
       ${actions}
@@ -627,6 +1413,10 @@ function renderThread() {
       })
     )
     .join("");
+  setTimeout(() => {
+    hydrateVideos();
+    hydrateAudio();
+  }, 0);
 }
 
 const SUGGESTIONS = [
@@ -656,8 +1446,66 @@ const SUGGESTIONS = [
   },
 ];
 
+const VIDEO_SUGGESTIONS = [
+  {
+    icon: "i-spark",
+    title: "Cinematic night scene",
+    text: "Moody, neon, slow push-in",
+    prompt: "A paper boat drifting down a rain-soaked Tokyo alley at night, neon reflections, slow cinematic push-in.",
+  },
+  {
+    icon: "i-star",
+    title: "Nature in macro",
+    text: "Golden light, shallow focus",
+    prompt: "Macro shot of a hummingbird hovering beside a red flower, golden backlight, shallow depth of field.",
+  },
+  {
+    icon: "i-edit",
+    title: "Atmospheric timelapse",
+    text: "Fog and first light",
+    prompt: "Timelapse of fog rolling over a mountain ridge at sunrise, warm light, gentle camera drift.",
+  },
+  {
+    icon: "i-image",
+    title: "Playful animation",
+    text: "A tiny cosmic explorer",
+    prompt: "A tiny astronaut exploring a glowing crystal cave, whimsical 3D animation style, soft volumetric light.",
+  },
+];
+
+const SPEECH_SUGGESTIONS = [
+  {
+    icon: "i-mic",
+    title: "Read a passage",
+    text: "Natural narration",
+    prompt: "The ocean keeps its own time. It moves without hurry, shaping stone and shore alike, and leaves the light scattered behind it.",
+  },
+  {
+    icon: "i-star",
+    title: "Warm welcome",
+    text: "Friendly and composed",
+    prompt: "Welcome back. Take a breath, settle in, and let's pick up exactly where we left off.",
+  },
+  {
+    icon: "i-edit",
+    title: "Product teaser",
+    text: "Bright, confident delivery",
+    prompt: "Meet the tool that turns a rough idea into something you can actually hear. Clear, expressive, and ready in seconds.",
+  },
+  {
+    icon: "i-spark",
+    title: "Calm meditation",
+    text: "Slow and spacious",
+    prompt: "Let your shoulders soften. Notice the air moving in, and the quiet pause before the next breath.",
+  },
+];
+
 function renderEmpty() {
   const hasKey = store.settings().apiKey.length > 0;
+  const modelKind = currentModelInfo()?.kind;
+  const video = modelKind === "video";
+  const speech = modelKind === "speech";
+  const suggestions = video ? VIDEO_SUGGESTIONS : speech ? SPEECH_SUGGESTIONS : SUGGESTIONS;
   const connect = hasKey
     ? ""
     : `<div class="connect-card">
@@ -671,15 +1519,19 @@ function renderEmpty() {
 
   dom.thread.innerHTML = `<div class="empty-state">
     <div class="empty-mark"><svg class="icon"><use href="#i-spark"/></svg></div>
-    <h1 class="empty-title">What can I help with?</h1>
+    <h1 class="empty-title">${video ? "What should we create?" : speech ? "What should we say?" : "What can I help with?"}</h1>
     <p class="empty-sub">${
       hasKey
-        ? "Ask anything — draft, debug, plan, or think out loud."
+        ? video
+          ? "Describe a shot, then set the duration, aspect ratio, and resolution below."
+          : speech
+            ? "Type a script, choose a voice, and optionally clone from a short sample."
+            : "Ask anything — draft, debug, plan, or think out loud."
         : "A private, OpenRouter-powered chat. Your key stays in this browser."
     }</p>
     ${connect}
     <div class="suggestions">
-      ${SUGGESTIONS.map(
+      ${suggestions.map(
         (item) => `<button type="button" class="suggestion" data-prompt="${escapeHtml(item.prompt)}">
           <svg class="icon"><use href="#${item.icon}"/></svg>
           <span>
@@ -791,6 +1643,62 @@ async function send() {
     return;
   }
 
+  const modelInfo = state.models.find((item) => item.id === model);
+  if (modelInfo?.kind === "video") {
+    if (images.length) {
+      toast("Video models accept a text prompt only. Remove the attachments first.");
+      return;
+    }
+    const options = videoOptionsFromControls() || clampVideoOptions(modelInfo);
+
+    store.addMessage(conversation.id, { role: "user", content: text, at: Date.now() });
+    store.setTitleFromMessage(conversation.id, text || "Video");
+    const assistant = store.addMessage(conversation.id, {
+      role: "assistant",
+      content: "",
+      model,
+      at: Date.now(),
+    });
+
+    clearComposer();
+    state.stick = true;
+    renderThread();
+    renderSidebar();
+    scrollBottom();
+    await runVideoGeneration(conversation.id, assistant.id, text, modelInfo, options);
+    return;
+  }
+
+  if (modelInfo?.kind === "speech") {
+    if (images.length) {
+      toast("Speech models accept text only. Remove the attachments first.");
+      return;
+    }
+    const options = speechOptionsFromControls() || {
+      voice: "",
+      speed: 1,
+      instructions: "",
+      reference: null,
+    };
+
+    store.addMessage(conversation.id, { role: "user", content: text, at: Date.now() });
+    store.setTitleFromMessage(conversation.id, text);
+    const assistant = store.addMessage(conversation.id, {
+      role: "assistant",
+      content: "",
+      model,
+      at: Date.now(),
+    });
+
+    clearComposer();
+    state.stick = true;
+    renderThread();
+    renderSidebar();
+    scrollBottom();
+    await runSpeechGeneration(conversation.id, assistant.id, text, modelInfo, options);
+    return;
+  }
+
   store.addMessage(conversation.id, { role: "user", content: text, images, at: Date.now() });
   store.setTitleFromMessage(conversation.id, text || "Image chat");
   const assistant = store.addMessage(conversation.id, {
@@ -812,6 +1720,276 @@ async function send() {
 
 function stopStreaming() {
   state.controller?.abort();
+}
+
+async function runVideoGeneration(conversationId, assistantId, prompt, model, preferred) {
+  const controller = new AbortController();
+  state.controller = controller;
+  state.sending = true;
+  updateComposerState();
+
+  const options = clampVideoOptions(model, preferred);
+  const estimatedCost = estimateVideoCost(model, options);
+  let latest = null;
+
+  const persist = (video) => {
+    latest = video;
+    store.updateMessage(conversationId, assistantId, { video: latest });
+    if (state.conversationId === conversationId) {
+      renderThread();
+      if (state.stick) scrollBottom();
+    }
+  };
+
+  try {
+    const payload = await createVideoGeneration({
+      apiKey: store.settings().apiKey,
+      model: model.id,
+      prompt,
+      duration: options.duration,
+      resolution: options.resolution,
+      aspectRatio: options.aspectRatio,
+      generateAudio: options.generateAudio,
+      inputReferences: state.videoReference ? [videoAudioReference(state.videoReference.data)] : [],
+      signal: controller.signal,
+    });
+
+    persist(
+      mergeVideoJob(
+        {
+          jobId: payload.id,
+          pollingUrl: payload.polling_url || "",
+          status: payload.status || "pending",
+          cost: 0,
+          estimatedCost: estimatedCost ?? null,
+          expiresAt: Number(payload.expires_at) || 0,
+          duration: options.duration,
+          resolution: options.resolution,
+          aspectRatio: options.aspectRatio,
+          generateAudio: options.generateAudio,
+          error: "",
+        },
+        payload
+      )
+    );
+
+    const finalJob = await waitForVideoGeneration({
+      apiKey: store.settings().apiKey,
+      job: payload,
+      intervalMs: 4000,
+      signal: controller.signal,
+      onUpdate: (job) => persist(mergeVideoJob(latest, job)),
+    });
+
+    const finalVideo = mergeVideoJob(latest, finalJob);
+    if (finalVideo.status === "completed") {
+      const urls = videoJobUrls(finalJob);
+      if (!urls.length) throw new Error("The video completed but OpenRouter returned no video URL.");
+      const blob = await fetchVideoContent({
+        apiKey: store.settings().apiKey,
+        url: urls[0],
+        signal: controller.signal,
+      });
+      const objectUrl = URL.createObjectURL(blob);
+      state.videoCache.set(finalVideo.jobId, { url: objectUrl, blob, createdAt: Date.now() });
+      persist({ ...finalVideo, error: "" });
+    } else {
+      const fallback = `Video ${finalVideo.status || "generation"} did not produce a file.`;
+      persist({ ...finalVideo, error: finalVideo.error || fallback });
+    }
+  } catch (error) {
+    if (error.name === "AbortError") {
+      if (latest) {
+        persist({
+          ...latest,
+          error: "Tracking stopped. The job may still finish and bill on OpenRouter. Use Check status to resume.",
+        });
+      } else {
+        store.updateMessage(conversationId, assistantId, {
+          stopped: true,
+          error: "Video request stopped.",
+        });
+      }
+    } else if (latest) {
+      persist({ ...latest, error: friendlyError(error) });
+    } else {
+      store.updateMessage(conversationId, assistantId, { error: friendlyError(error) });
+    }
+  } finally {
+    if (state.controller === controller) {
+      state.controller = null;
+      state.sending = false;
+    }
+    renderSidebar();
+    if (state.conversationId === conversationId) {
+      renderThread();
+      updateComposerState();
+      if (state.stick) scrollBottom();
+    }
+  }
+}
+
+async function runSpeechGeneration(conversationId, assistantId, text, model, options) {
+  const controller = new AbortController();
+  state.controller = controller;
+  state.sending = true;
+  updateComposerState();
+
+  const key = audioKey("speech", assistantId);
+  const estimatedCost = estimateSpeechCost(model, text);
+  let speech = {
+    status: "generating",
+    model: model.id,
+    voice: options.voice || "",
+    format: "mp3",
+    bytes: 0,
+    estimatedCost: estimatedCost ?? null,
+    referenceName: options.reference?.name || "",
+    instructions: options.instructions || "",
+    error: "",
+  };
+
+  const persist = (next) => {
+    speech = next;
+    store.updateMessage(conversationId, assistantId, { speech });
+    if (state.conversationId === conversationId) {
+      renderThread();
+      if (state.stick) scrollBottom();
+    }
+  };
+
+  persist(speech);
+
+  try {
+    const result = await createSpeech({
+      apiKey: store.settings().apiKey,
+      model: model.id,
+      input: text,
+      voice: options.voice,
+      instructions: options.instructions,
+      speed: options.speed,
+      responseFormat: "mp3",
+      references: options.reference ? speechReferences(options.reference) : [],
+      signal: controller.signal,
+    });
+
+    const previous = state.audioCache.get(key);
+    if (previous) {
+      state.audioCache.delete(key);
+      URL.revokeObjectURL(previous.url);
+    }
+    state.audioCache.set(key, { url: URL.createObjectURL(result.blob), blob: result.blob, createdAt: Date.now() });
+    state.audioMissing.delete(key);
+    await putAudio(key, result.blob);
+
+    persist({
+      ...speech,
+      status: "completed",
+      bytes: result.blob.size,
+      format: audioExtension(result.type),
+      error: "",
+    });
+    setTimeout(() => playAudioKey(key), 80);
+  } catch (error) {
+    if (error.name === "AbortError") {
+      persist({ ...speech, status: "failed", error: "Speech generation stopped." });
+    } else {
+      persist({ ...speech, status: "failed", error: friendlyError(error) });
+    }
+  } finally {
+    if (state.controller === controller) {
+      state.controller = null;
+      state.sending = false;
+    }
+    renderSidebar();
+    if (state.conversationId === conversationId) {
+      renderThread();
+      updateComposerState();
+      if (state.stick) scrollBottom();
+    }
+  }
+}
+
+async function runVoiceoverGeneration(conversationId, assistantId, script, model, options) {
+  const controller = new AbortController();
+  state.voiceoverController = controller;
+  state.voiceoverBusy = true;
+
+  const key = audioKey("voiceover", assistantId);
+  const conversation = store.getConversation(conversationId);
+  const message = conversation?.messages.find((item) => item.id === assistantId);
+  if (!message) {
+    state.voiceoverController = null;
+    state.voiceoverBusy = false;
+    return;
+  }
+
+  let voiceover = {
+    status: "generating",
+    model: model.id,
+    voice: options.voice || "",
+    format: "mp3",
+    bytes: 0,
+    referenceName: options.reference?.name || "",
+    instructions: options.instructions || "",
+    script,
+    error: "",
+    at: Date.now(),
+  };
+
+  const persist = (next) => {
+    voiceover = next;
+    store.updateMessage(conversationId, assistantId, { voiceover });
+    if (state.conversationId === conversationId) {
+      renderThread();
+      if (state.stick) scrollBottom();
+    }
+  };
+
+  releaseAudio(key);
+  persist(voiceover);
+
+  try {
+    const result = await createSpeech({
+      apiKey: store.settings().apiKey,
+      model: model.id,
+      input: script,
+      voice: options.voice,
+      instructions: options.instructions,
+      speed: options.speed,
+      responseFormat: "mp3",
+      references: options.reference ? speechReferences(options.reference) : [],
+      signal: controller.signal,
+    });
+
+    state.audioCache.set(key, { url: URL.createObjectURL(result.blob), blob: result.blob, createdAt: Date.now() });
+    state.audioMissing.delete(key);
+    await putAudio(key, result.blob);
+
+    persist({
+      ...voiceover,
+      status: "completed",
+      bytes: result.blob.size,
+      format: audioExtension(result.type),
+      error: "",
+    });
+    setTimeout(() => playAudioKey(key), 80);
+  } catch (error) {
+    if (error.name === "AbortError") {
+      persist({ ...voiceover, status: "failed", error: "Voiceover generation stopped." });
+    } else {
+      persist({ ...voiceover, status: "failed", error: friendlyError(error) });
+    }
+  } finally {
+    if (state.voiceoverController === controller) {
+      state.voiceoverController = null;
+      state.voiceoverBusy = false;
+    }
+    if (state.conversationId === conversationId) {
+      renderThread();
+      if (state.stick) scrollBottom();
+    }
+  }
 }
 
 async function runCompletion(conversationId, assistantId, history, model) {
@@ -936,6 +2114,36 @@ function regenerate(assistantId) {
   const conversation = currentConversation();
   if (!conversation) return;
 
+  const target = conversation.messages.find((message) => message.id === assistantId);
+  const previousVideo = target?.video || null;
+  const model = conversation.model || store.settings().defaultModel;
+  const modelInfo = state.models.find((item) => item.id === model);
+  const lastUser = [...conversation.messages].reverse().find((message) => message.role === "user");
+
+  if (modelInfo?.kind === "video") {
+    if (!lastUser?.content) {
+      toast("A text prompt is needed to regenerate this video.");
+      return;
+    }
+    if (lastUser.images?.length) {
+      toast("Video models accept a text prompt only.");
+      return;
+    }
+  }
+
+  if (modelInfo?.kind === "speech") {
+    if (!lastUser?.content) {
+      toast("Text is needed to regenerate this speech.");
+      return;
+    }
+    if (lastUser.images?.length) {
+      toast("Speech models accept text only.");
+      return;
+    }
+  }
+
+  releaseVideoCache(target?.video);
+  releaseMessageAudio(target);
   store.removeMessagesFrom(conversation.id, assistantId);
   const history = conversation.messages.slice();
   if (!history.length) {
@@ -943,7 +2151,6 @@ function regenerate(assistantId) {
     return;
   }
 
-  const model = conversation.model || store.settings().defaultModel;
   const assistant = store.addMessage(conversation.id, {
     role: "assistant",
     content: "",
@@ -955,7 +2162,94 @@ function regenerate(assistantId) {
   renderThread();
   renderSidebar();
   scrollBottom();
+
+  if (modelInfo?.kind === "video") {
+    const options = previousVideo
+      ? {
+          duration: previousVideo.duration,
+          resolution: previousVideo.resolution,
+          aspectRatio: previousVideo.aspectRatio,
+          generateAudio: previousVideo.generateAudio,
+        }
+      : videoOptionsFromControls() || clampVideoOptions(modelInfo);
+    runVideoGeneration(conversation.id, assistant.id, lastUser.content, modelInfo, options);
+    return;
+  }
+
+  if (modelInfo?.kind === "speech") {
+    const options = speechOptionsFromControls() || {
+      voice: target?.speech?.voice || "",
+      speed: 1,
+      instructions: target?.speech?.instructions || "",
+      reference: state.speechReference,
+    };
+    runSpeechGeneration(conversation.id, assistant.id, lastUser.content, modelInfo, options);
+    return;
+  }
+
   runCompletion(conversation.id, assistant.id, history, model);
+}
+
+function openVoiceover(messageId) {
+  const conversation = currentConversation();
+  const message = conversation?.messages.find((item) => item.id === messageId);
+  if (!conversation || !message?.video) return;
+  const models = speechModels();
+  if (!models.length) {
+    toast("No speech models are available. Refresh the model catalog.");
+    return;
+  }
+
+  state.voiceoverMessageId = messageId;
+  state.voiceoverConversationId = conversation.id;
+  state.voiceoverReference = null;
+  dom.voiceoverModel.innerHTML = models
+    .map((model) => `<option value="${escapeHtml(model.id)}">${escapeHtml(model.name || model.id)}</option>`)
+    .join("");
+
+  const preferred = message.voiceover?.model || store.settings().speechModel;
+  const selected = models.find((model) => model.id === preferred) || models[0];
+  dom.voiceoverModel.value = selected.id;
+  const voice = message.voiceover?.voice && (!selected.voices?.length || selected.voices.includes(message.voiceover.voice))
+    ? message.voiceover.voice
+    : selected.voices?.[0] || store.settings().speechVoice || "";
+  dom.voiceoverVoice.value = voice;
+  dom.voiceoverScript.value = message.voiceover?.script || "";
+  dom.voiceoverInstructions.value = message.voiceover?.instructions || store.settings().speechInstructions || "";
+  dom.voiceoverState.textContent = "";
+  dom.voiceoverGenerate.disabled = false;
+  renderVoiceoverReference();
+  dom.voiceoverDialog.showModal();
+}
+
+function generateVoiceover() {
+  if (state.voiceoverBusy) return;
+  const script = dom.voiceoverScript.value.trim();
+  if (!script) {
+    dom.voiceoverState.textContent = "Enter a script first.";
+    dom.voiceoverScript.focus();
+    return;
+  }
+  const model = speechModels().find((item) => item.id === dom.voiceoverModel.value);
+  if (!model) {
+    dom.voiceoverState.textContent = "Choose a speech model.";
+    return;
+  }
+  const conversationId = state.voiceoverConversationId;
+  const assistantId = state.voiceoverMessageId;
+  if (!conversationId || !assistantId) return;
+
+  const options = {
+    voice: dom.voiceoverVoice.value.trim(),
+    speed: clampSpeechSpeed(store.settings().speechSpeed),
+    instructions: dom.voiceoverInstructions.value.trim(),
+    reference: state.voiceoverReference,
+  };
+
+  dom.voiceoverState.textContent = "";
+  dom.voiceoverGenerate.disabled = true;
+  dom.voiceoverDialog.close();
+  void runVoiceoverGeneration(conversationId, assistantId, script, model, options);
 }
 
 /* ---------------- Images ---------------- */
@@ -993,6 +2287,10 @@ async function prepareImage(file) {
 }
 
 async function addFiles(files) {
+  if (currentModelInfo()?.kind === "video") {
+    toast("Video models accept a text prompt only.");
+    return;
+  }
   const images = [...files].filter((file) => file.type.startsWith("image/"));
   if (!images.length) return;
 
@@ -1250,6 +2548,9 @@ function bindEvents() {
   });
   $("#clear-all").addEventListener("click", () => {
     if (!confirm("Delete all chats and your saved API key? This cannot be undone.")) return;
+    for (const item of state.videoCache.values()) URL.revokeObjectURL(item.url);
+    state.videoCache.clear();
+    state.videoLoading.clear();
     store.clearAll();
     state.modelsError = "";
     state.pendingDefaultModel = null;
@@ -1279,6 +2580,7 @@ function bindEvents() {
   dom.input.addEventListener("input", () => {
     autoGrow();
     updateComposerState();
+    updateSpeechEstimate();
   });
 
   dom.input.addEventListener("keydown", (event) => {
@@ -1299,6 +2601,73 @@ function bindEvents() {
   });
 
   $("#attach-btn").addEventListener("click", () => dom.fileInput.click());
+
+  const videoSettingChanged = () => {
+    if (currentModelInfo()?.kind !== "video") return;
+    const options = videoOptionsFromControls();
+    if (!options) return;
+    store.saveSettings({
+      videoDuration: options.duration,
+      videoResolution: options.resolution,
+      videoAspectRatio: options.aspectRatio,
+      videoAudio: options.generateAudio,
+    });
+    updateVideoEstimate(options);
+    updateComposerState();
+  };
+  [dom.videoAspect, dom.videoDuration, dom.videoResolution, dom.videoAudio].forEach((control) => {
+    control?.addEventListener("change", videoSettingChanged);
+  });
+
+  dom.speechReferenceBtn?.addEventListener("click", () => chooseAudioSample("speech"));
+  dom.videoReferenceBtn?.addEventListener("click", () => chooseAudioSample("video"));
+  dom.voiceoverReferenceBtn?.addEventListener("click", () => chooseAudioSample("voiceover"));
+
+  dom.speechReferenceClear?.addEventListener("click", () => {
+    state.speechReference = null;
+    renderSpeechReference();
+    updateSpeechEstimate();
+  });
+  dom.videoReferenceClear?.addEventListener("click", () => {
+    state.videoReference = null;
+    renderVideoReference();
+  });
+  dom.voiceoverReferenceClear?.addEventListener("click", () => {
+    state.voiceoverReference = null;
+    renderVoiceoverReference();
+  });
+
+  dom.speechTranscript?.addEventListener("input", () => {
+    if (state.speechReference) state.speechReference.transcript = dom.speechTranscript.value;
+  });
+  dom.voiceoverTranscript?.addEventListener("input", () => {
+    if (state.voiceoverReference) state.voiceoverReference.transcript = dom.voiceoverTranscript.value;
+  });
+
+  dom.speechVoice?.addEventListener("change", () => {
+    store.saveSettings({ speechVoice: dom.speechVoice.value.trim() });
+  });
+  dom.speechSpeed?.addEventListener("change", () => {
+    const speed = clampSpeechSpeed(dom.speechSpeed.value);
+    dom.speechSpeed.value = String(speed);
+    store.saveSettings({ speechSpeed: speed });
+    updateSpeechEstimate();
+  });
+  dom.speechInstructions?.addEventListener("change", () => {
+    store.saveSettings({ speechInstructions: dom.speechInstructions.value.trim() });
+  });
+
+  dom.voiceoverModel?.addEventListener("change", () => {
+    const model = speechModels().find((item) => item.id === dom.voiceoverModel.value);
+    if (model?.voices?.length) dom.voiceoverVoice.value = model.voices[0];
+  });
+  dom.voiceoverGenerate?.addEventListener("click", generateVoiceover);
+
+  dom.audioInput.addEventListener("change", () => {
+    const file = dom.audioInput.files?.[0];
+    dom.audioInput.value = "";
+    void applyAudioSample(file);
+  });
   dom.fileInput.addEventListener("change", () => {
     if (dom.fileInput.files?.length) addFiles(dom.fileInput.files);
     dom.fileInput.value = "";
@@ -1327,6 +2696,18 @@ function bindEvents() {
   $("#mic-btn").addEventListener("click", toggleDictation);
 
   dom.thread.addEventListener("click", async (event) => {
+    const voiceoverButton = event.target.closest("[data-voiceover]");
+    if (voiceoverButton) {
+      openVoiceover(voiceoverButton.dataset.voiceover);
+      return;
+    }
+
+    const videoRefresh = event.target.closest("[data-video-refresh]");
+    if (videoRefresh) {
+      await refreshVideoAsset(videoRefresh.dataset.videoRefresh, { notify: true });
+      return;
+    }
+
     const codeButton = event.target.closest("[data-copy-code]");
     if (codeButton) {
       const block = codeButton.closest(".code-block");
