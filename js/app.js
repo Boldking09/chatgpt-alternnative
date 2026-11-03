@@ -41,6 +41,7 @@ const dom = {
   modelPickerName: $("#model-picker-name"),
   modelBadge: $("#model-badge"),
   conversationList: $("#conversation-list"),
+  dashboardRow: $("#dashboard-row"),
   toast: $("#toast"),
   promptLabel: $("#prompt-label"),
   promptBtn: $("#prompt-btn"),
@@ -94,6 +95,7 @@ const dom = {
 
 const state = {
   conversationId: null,
+  dashboard: false,
   sending: false,
   controller: null,
   models: [],
@@ -115,6 +117,7 @@ const state = {
   audioLoading: new Set(),
   audioMissing: new Set(),
   speechReference: null,
+  dashboardReference: null,
   videoReference: null,
   voiceoverReference: null,
   audioTarget: "",
@@ -349,6 +352,20 @@ function renderSpeechReference() {
   if (dom.speechTranscript && reference) dom.speechTranscript.value = reference.transcript || "";
 }
 
+function renderDashboardReference() {
+  const reference = state.dashboardReference;
+  const chip = $("#dash-sample-chip");
+  const name = $("#dash-sample-name");
+  const row = $("#dash-sample-transcript-row");
+  const transcript = $("#dash-sample-transcript");
+  if (chip) chip.hidden = !reference;
+  if (name) name.textContent = reference?.name || "";
+  if (row) row.hidden = !reference;
+  if (transcript && reference) transcript.value = reference.transcript || "";
+  const clone = document.querySelector('[data-dash-action="clone"]');
+  if (clone) clone.disabled = !reference || !speechModels().length;
+}
+
 function renderVideoReference() {
   const reference = state.videoReference;
   if (dom.videoReferenceChip) dom.videoReferenceChip.hidden = !reference;
@@ -408,6 +425,9 @@ async function applyAudioSample(file) {
       state.speechReference = sample;
       renderSpeechReference();
       updateSpeechEstimate();
+    } else if (target === "dashboard") {
+      state.dashboardReference = sample;
+      renderDashboardReference();
     } else if (target === "video") {
       state.videoReference = sample;
       renderVideoReference();
@@ -460,6 +480,12 @@ function updateAccount() {
 }
 
 function updateTopbar() {
+  if (state.dashboard) {
+    dom.modelPickerName.textContent = "Studio dashboard";
+    dom.modelPickerName.title = "Speech, video, and voice cloning";
+    dom.modelBadge.hidden = true;
+    return;
+  }
   const id = currentModel();
   dom.modelPickerName.textContent = modelName(id);
   dom.modelPickerName.title = id;
@@ -473,6 +499,13 @@ function updateTopbar() {
 }
 
 function updateChrome() {
+  if (state.dashboard) {
+    dom.composerWrap.hidden = true;
+    updateTopbar();
+    updateAccount();
+    return;
+  }
+  dom.composerWrap.hidden = false;
   updateTopbar();
   updatePromptLabel();
   updateAccount();
@@ -742,6 +775,7 @@ function conversationRow(conversation) {
 }
 
 function renderSidebar() {
+  dom.dashboardRow?.classList.toggle("active", state.dashboard);
   const items = store.conversations();
   if (!items.length) {
     dom.conversationList.innerHTML = `<div class="conv-empty">Your chats will appear here.</div>`;
@@ -844,13 +878,23 @@ function handleMenuAction(action, id) {
   }
   if (action === "delete") {
     if (!confirm(`Delete “${conversation.title}”? This cannot be undone.`)) return;
-    for (const message of conversation.messages) releaseVideoCache(message.video);
+    for (const message of conversation.messages) {
+      releaseVideoCache(message.video);
+      for (const kind of ["speech", "voiceover"]) {
+        if (!message[kind]) continue;
+        const key = audioKey(kind, message.id);
+        releaseAudio(key);
+        state.audioMissing.delete(key);
+        void deleteAudio(key).catch(() => {});
+      }
+    }
     store.removeConversation(id);
     if (state.conversationId === id) {
       navigate("#/new");
     } else {
       renderSidebar();
     }
+    if (state.dashboard) renderDashboard();
     toast("Chat deleted");
   }
 }
@@ -944,6 +988,7 @@ async function loadModels(force = false) {
     state.models = cache.models;
     renderModels();
     updateChrome();
+    if (state.dashboard) renderDashboard();
     return;
   }
   state.modelsLoading = true;
@@ -964,6 +1009,7 @@ async function loadModels(force = false) {
     state.modelsError = chatResult.reason?.message || "Could not load models.";
     renderModels();
     updateChrome();
+    if (state.dashboard) renderDashboard();
     return;
   }
 
@@ -996,6 +1042,7 @@ async function loadModels(force = false) {
   if (!warnings.length) store.saveModels(state.models);
   renderModels();
   updateChrome();
+  if (state.dashboard) renderDashboard();
 }
 
 function openModels(mode = "chat") {
@@ -1500,6 +1547,276 @@ const SPEECH_SUGGESTIONS = [
   },
 ];
 
+function dashboardModelSelect(id, models, selected) {
+  if (!models.length) {
+    return `<select class="text-input" id="${id}" disabled><option value="">No models loaded</option></select>`;
+  }
+  const chosen = models.some((model) => model.id === selected) ? selected : models[0].id;
+  return `<select class="text-input" id="${id}">
+    ${models
+      .map(
+        (model) => `<option value="${escapeHtml(model.id)}"${model.id === chosen ? " selected" : ""}>${escapeHtml(model.name || model.id)}</option>`
+      )
+      .join("")}
+  </select>`;
+}
+
+function dashboardData() {
+  const conversations = store.conversations();
+  let videos = 0;
+  let speech = 0;
+  let voiceovers = 0;
+  const videoItems = [];
+  for (const conversation of conversations) {
+    for (const message of conversation.messages) {
+      if (message.video) {
+        videos += 1;
+        videoItems.push({ conversation, message });
+      }
+      if (message.speech) speech += 1;
+      if (message.voiceover) voiceovers += 1;
+    }
+  }
+  videoItems.sort((a, b) => (b.message.at || 0) - (a.message.at || 0));
+  return { conversations, videos, speech, voiceovers, videoItems };
+}
+
+function renderDashboard() {
+  const data = dashboardData();
+  const settings = store.settings();
+  const speech = speechModels();
+  const videoModels = state.models.filter((model) => model.kind === "video");
+  const chat = state.models.filter((model) => model.kind !== "video" && model.kind !== "speech");
+  const speechModel = speech.find((model) => model.id === settings.speechModel) || speech[0];
+  const chatModel = chat.find((model) => model.id === settings.defaultModel) || chat[0];
+  const videoModel = videoModels.find((model) => model.id === settings.defaultModel) || videoModels[0];
+  const voice = settings.speechVoice || speechModel?.voices?.[0] || "";
+  const reference = state.dashboardReference;
+  const status = settings.apiKey ? "API key saved" : "Add an API key to generate";
+  const warning = state.modelsError
+    ? `<div class="dash-warning"><svg class="icon"><use href="#i-x"/></svg><span>${escapeHtml(state.modelsError)}</span></div>`
+    : "";
+
+  const rows = data.videoItems.slice(0, 6).map(({ conversation, message }) => {
+    const video = message.video;
+    const voiceover = message.voiceover;
+    const detail = [
+      video.status || "working",
+      voiceover?.status ? `voiceover ${voiceover.status}` : "no voiceover",
+      `${conversation.messages.length} msgs`,
+    ].join(" · ");
+    const buttonLabel = voiceover?.status === "generating"
+      ? "Generating…"
+      : voiceover
+        ? "Redo voiceover"
+        : "Add voiceover";
+    return `<div class="dash-video-row">
+      <span class="dash-video-icon"><svg class="icon"><use href="#i-film"/></svg></span>
+      <span class="dash-video-info">
+        <strong>${escapeHtml(conversation.title || "Untitled video")}</strong>
+        <small>${escapeHtml(detail)}</small>
+      </span>
+      <button type="button" class="chip-btn" data-dash-action="voiceover" data-id="${escapeHtml(message.id)}" data-conversation="${escapeHtml(conversation.id)}"${state.voiceoverBusy || voiceover?.status === "generating" ? " disabled" : ""}>${escapeHtml(buttonLabel)}</button>
+      <a class="chip-btn" href="#/c/${encodeURIComponent(conversation.id)}">Open</a>
+    </div>`;
+  }).join("");
+
+  dom.thread.innerHTML = `<div class="dashboard">
+    <header class="dash-head">
+      <div>
+        <p class="dash-kicker">OpenRouter studio</p>
+        <h1>Dashboard</h1>
+        <p class="dash-sub">Launch chat, video, speech, voice cloning, and video voiceovers from one place.</p>
+      </div>
+      <div class="dash-head-actions">
+        <span class="dash-status${settings.apiKey ? " ready" : ""}">${escapeHtml(status)}</span>
+        <button type="button" class="btn ghost" data-dash-action="refresh-models">
+          <svg class="icon"><use href="#i-refresh"/></svg>
+          <span>Refresh models</span>
+        </button>
+      </div>
+    </header>
+
+    ${warning}
+
+    <div class="dash-stats">
+      <div class="dash-stat"><strong>${data.conversations.length}</strong><span>Chats</span></div>
+      <div class="dash-stat"><strong>${data.videos}</strong><span>Videos</span></div>
+      <div class="dash-stat"><strong>${data.speech}</strong><span>Speech clips</span></div>
+      <div class="dash-stat"><strong>${data.voiceovers}</strong><span>Voiceovers</span></div>
+      <div class="dash-stat"><strong>${speech.length}</strong><span>Speech models</span></div>
+    </div>
+
+    <div class="dash-grid">
+      <section class="dash-card">
+        <div class="dash-card-head">
+          <span class="dash-icon"><svg class="icon"><use href="#i-spark"/></svg></span>
+          <div><h2>Chat</h2><p>Start a new conversation with any text model.</p></div>
+        </div>
+        <label class="dash-field"><span>Model</span>${dashboardModelSelect("dash-chat-model", chat, chatModel?.id)}</label>
+        <label class="dash-field"><span>Prompt</span><textarea class="text-input textarea" id="dash-chat-prompt" rows="3" placeholder="What should we work on?"></textarea></label>
+        <button type="button" class="btn primary dash-submit" data-dash-action="chat"${chat.length ? "" : " disabled"}>Start chat</button>
+      </section>
+
+      <section class="dash-card">
+        <div class="dash-card-head">
+          <span class="dash-icon"><svg class="icon"><use href="#i-film"/></svg></span>
+          <div><h2>Video generation</h2><p>Turn a prompt into a generated clip.</p></div>
+        </div>
+        <label class="dash-field"><span>Model</span>${dashboardModelSelect("dash-video-model", videoModels, videoModel?.id)}</label>
+        <label class="dash-field"><span>Prompt</span><textarea class="text-input textarea" id="dash-video-prompt" rows="3" placeholder="Describe the shot, motion, and mood."></textarea></label>
+        <p class="dash-help">Duration, aspect ratio, resolution, and audio are set in the composer after launch.</p>
+        <button type="button" class="btn primary dash-submit" data-dash-action="video"${videoModels.length ? "" : " disabled"}>Generate video</button>
+      </section>
+
+      <section class="dash-card dash-wide">
+        <div class="dash-card-head">
+          <span class="dash-icon"><svg class="icon"><use href="#i-wave"/></svg></span>
+          <div><h2>Speech generation</h2><p>Type a script and hear it in a chosen voice.</p></div>
+        </div>
+        <div class="dash-form-grid">
+          <label class="dash-field"><span>Model</span>${dashboardModelSelect("dash-speech-model", speech, speechModel?.id)}</label>
+          <label class="dash-field"><span>Voice</span><input class="text-input" id="dash-speech-voice" list="speech-voices" value="${escapeHtml(voice)}" placeholder="Provider default" spellcheck="false"></label>
+          <label class="dash-field"><span>Speed</span><input class="text-input" id="dash-speech-speed" type="number" min="0.5" max="2" step="0.05" value="${settings.speechSpeed}"></label>
+          <label class="dash-field"><span>Delivery</span><input class="text-input" id="dash-speech-instructions" value="${escapeHtml(settings.speechInstructions || "")}" placeholder="Optional: warm, calm, upbeat"></label>
+        </div>
+        <label class="dash-field"><span>Script</span><textarea class="text-input textarea" id="dash-speech-prompt" rows="4" placeholder="Type the words to speak."></textarea></label>
+        <button type="button" class="btn primary dash-submit" data-dash-action="speech"${speech.length ? "" : " disabled"}>Generate speech</button>
+      </section>
+
+      <section class="dash-card dash-wide">
+        <div class="dash-card-head">
+          <span class="dash-icon"><svg class="icon"><use href="#i-mic"/></svg></span>
+          <div><h2>Voice cloning</h2><p>Clone from a short audio sample, then generate new speech.</p></div>
+        </div>
+        <div class="dash-form-grid">
+          <label class="dash-field"><span>Model</span>${dashboardModelSelect("dash-clone-model", speech, speechModel?.id)}</label>
+          <label class="dash-field"><span>Voice</span><input class="text-input" id="dash-clone-voice" list="speech-voices" value="${escapeHtml(voice)}" placeholder="Provider default" spellcheck="false"></label>
+        </div>
+        <div class="dash-reference-row">
+          <button type="button" class="chip-btn" data-dash-action="pick-sample">
+            <svg class="icon"><use href="#i-mic"/></svg><span>Choose audio sample</span>
+          </button>
+          <span class="reference-chip" id="dash-sample-chip"${reference ? "" : " hidden"}>
+            <span id="dash-sample-name">${escapeHtml(reference?.name || "")}</span>
+            <button type="button" class="reference-clear" data-dash-action="clear-sample" aria-label="Remove sample"><svg class="icon"><use href="#i-x"/></svg></button>
+          </span>
+          <span class="reference-help">One sample, up to 12 MB. Saved for this session.</span>
+        </div>
+        <label class="dash-field" id="dash-sample-transcript-row"${reference ? "" : " hidden"}>
+          <span>Sample transcript</span>
+          <textarea class="text-input textarea" id="dash-sample-transcript" rows="2" maxlength="10000" placeholder="Type what the sample says for a closer match.">${escapeHtml(reference?.transcript || "")}</textarea>
+        </label>
+        <label class="dash-field"><span>New script</span><textarea class="text-input textarea" id="dash-clone-prompt" rows="4" placeholder="What should the cloned voice say?"></textarea></label>
+        <button type="button" class="btn primary dash-submit" data-dash-action="clone"${speech.length && reference ? "" : " disabled"}>Clone voice</button>
+      </section>
+
+      <section class="dash-card dash-wide">
+        <div class="dash-card-head">
+          <span class="dash-icon"><svg class="icon"><use href="#i-wave"/></svg></span>
+          <div><h2>Video voiceovers</h2><p>Add a separate generated audio track to an existing video.</p></div>
+        </div>
+        ${rows || `<div class="dash-empty">No videos yet. Generate a video first, then return here to add a voiceover.</div>`}
+      </section>
+    </div>
+  </div>`;
+
+  renderDashboardReference();
+}
+
+function dashboardStart(kind) {
+  if (!store.settings().apiKey) {
+    openSettings({ focus: "api-key" });
+    toast("Add your OpenRouter API key first.");
+    return;
+  }
+
+  const config = {
+    chat: { model: $("#dash-chat-model")?.value, prompt: $("#dash-chat-prompt")?.value.trim() },
+    video: { model: $("#dash-video-model")?.value, prompt: $("#dash-video-prompt")?.value.trim() },
+    speech: {
+      model: $("#dash-speech-model")?.value,
+      prompt: $("#dash-speech-prompt")?.value.trim(),
+      voice: $("#dash-speech-voice")?.value.trim() || "",
+      speed: clampSpeechSpeed($("#dash-speech-speed")?.value),
+      instructions: $("#dash-speech-instructions")?.value.trim() || "",
+    },
+    clone: {
+      model: $("#dash-clone-model")?.value,
+      prompt: $("#dash-clone-prompt")?.value.trim(),
+      voice: $("#dash-clone-voice")?.value.trim() || "",
+    },
+  }[kind];
+  if (!config?.model) {
+    toast("Choose a model first.");
+    return;
+  }
+  if (!config.prompt) {
+    toast("Add a prompt first.");
+    return;
+  }
+  if (kind === "clone") {
+    const transcript = $("#dash-sample-transcript")?.value || "";
+    if (!state.dashboardReference) {
+      toast("Choose an audio sample to clone.");
+      return;
+    }
+    state.dashboardReference.transcript = transcript;
+  }
+
+  const conversation = store.createConversation({ model: config.model });
+  state.dashboard = false;
+  window.history.replaceState(null, "", `#/c/${conversation.id}`);
+  route();
+
+  if (kind === "speech" || kind === "clone") {
+    if (kind === "clone") state.speechReference = state.dashboardReference;
+    else state.speechReference = null;
+    dom.speechVoice.value = config.voice;
+    dom.speechSpeed.value = String(config.speed ?? 1);
+    dom.speechInstructions.value = config.instructions ?? "";
+    store.saveSettings({
+      speechModel: config.model,
+      speechVoice: config.voice,
+      speechSpeed: config.speed ?? 1,
+      speechInstructions: config.instructions ?? "",
+    });
+    renderSpeechReference();
+  }
+
+  dom.input.value = config.prompt;
+  autoGrow();
+  updateComposerState();
+  void send();
+}
+
+function handleDashboardAction(button) {
+  const action = button.dataset.dashAction;
+  if (action === "chat" || action === "video" || action === "speech" || action === "clone") {
+    dashboardStart(action);
+    return;
+  }
+  if (action === "pick-sample") {
+    chooseAudioSample("dashboard");
+    return;
+  }
+  if (action === "clear-sample") {
+    state.dashboardReference = null;
+    renderDashboard();
+    return;
+  }
+  if (action === "voiceover") {
+    openVoiceover(button.dataset.id, button.dataset.conversation);
+    return;
+  }
+  if (action === "refresh-models") {
+    button.disabled = true;
+    void loadModels(true).then(() => {
+      if (state.dashboard) renderDashboard();
+    });
+  }
+}
+
 function renderEmpty() {
   const hasKey = store.settings().apiKey.length > 0;
   const modelKind = currentModelInfo()?.kind;
@@ -1545,6 +1862,14 @@ function renderEmpty() {
 }
 
 function renderMain() {
+  dom.thread.classList.toggle("dashboard-thread", state.dashboard);
+  if (state.dashboard) {
+    renderDashboard();
+    updateChrome();
+    state.stick = false;
+    requestAnimationFrame(() => dom.scroll.scrollTo({ top: 0, behavior: "auto" }));
+    return;
+  }
   const conversation = currentConversation();
   if (!conversation || !conversation.messages.length) renderEmpty();
   else renderThread();
@@ -1575,12 +1900,14 @@ function parseRoute() {
 
 function route() {
   if (state.sending) stopStreaming();
-  const id = parseRoute();
-  if (id && store.getConversation(id)) {
+  const dashboard = location.hash === "#/dashboard";
+  state.dashboard = dashboard;
+  const id = dashboard ? null : parseRoute();
+  if (!dashboard && id && store.getConversation(id)) {
     state.conversationId = id;
   } else {
     state.conversationId = null;
-    if (location.hash !== "#/new") history.replaceState(null, "", "#/new");
+    if (!dashboard && location.hash !== "#/new") history.replaceState(null, "", "#/new");
   }
 
   state.renamingId = null;
@@ -1944,6 +2271,7 @@ async function runVoiceoverGeneration(conversationId, assistantId, script, model
       renderThread();
       if (state.stick) scrollBottom();
     }
+    if (state.dashboard) renderDashboard();
   };
 
   releaseAudio(key);
@@ -1989,6 +2317,7 @@ async function runVoiceoverGeneration(conversationId, assistantId, script, model
       renderThread();
       if (state.stick) scrollBottom();
     }
+    if (state.dashboard) renderDashboard();
   }
 }
 
@@ -2190,8 +2519,8 @@ function regenerate(assistantId) {
   runCompletion(conversation.id, assistant.id, history, model);
 }
 
-function openVoiceover(messageId) {
-  const conversation = currentConversation();
+function openVoiceover(messageId, conversationId = null) {
+  const conversation = conversationId ? store.getConversation(conversationId) : currentConversation();
   const message = conversation?.messages.find((item) => item.id === messageId);
   if (!conversation || !message?.video) return;
   const models = speechModels();
@@ -2461,6 +2790,10 @@ function bindEvents() {
     setTimeout(() => dom.input.focus(), 40);
   });
   $("#search-chats").addEventListener("click", openSearch);
+  dom.dashboardRow?.addEventListener("click", () => {
+    navigate("#/dashboard");
+    closeMobileSidebar();
+  });
   $("#settings-row").addEventListener("click", () => openSettings());
   $("#account-row").addEventListener("click", () => openSettings());
   $("#avatar-btn").addEventListener("click", () => openSettings());
@@ -2551,6 +2884,10 @@ function bindEvents() {
     for (const item of state.videoCache.values()) URL.revokeObjectURL(item.url);
     state.videoCache.clear();
     state.videoLoading.clear();
+    for (const key of [...state.audioCache.keys()]) releaseAudio(key);
+    state.audioCache.clear();
+    state.audioMissing.clear();
+    void clearAudio().catch(() => {});
     store.clearAll();
     state.modelsError = "";
     state.pendingDefaultModel = null;
@@ -2695,7 +3032,19 @@ function bindEvents() {
 
   $("#mic-btn").addEventListener("click", toggleDictation);
 
+  dom.thread.addEventListener("input", (event) => {
+    if (event.target.id === "dash-sample-transcript" && state.dashboardReference) {
+      state.dashboardReference.transcript = event.target.value;
+    }
+  });
+
   dom.thread.addEventListener("click", async (event) => {
+    const dashboardAction = event.target.closest("[data-dash-action]");
+    if (dashboardAction) {
+      handleDashboardAction(dashboardAction);
+      return;
+    }
+
     const voiceoverButton = event.target.closest("[data-voiceover]");
     if (voiceoverButton) {
       openVoiceover(voiceoverButton.dataset.voiceover);
