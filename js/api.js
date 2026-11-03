@@ -2,7 +2,8 @@ const BASE = "https://openrouter.ai/api/v1";
 const MODELS_URL = `${BASE}/models`;
 const CHAT_URL = `${BASE}/chat/completions`;
 const VIDEO_MODELS_URL = `${BASE}/videos/models`;
-const VIDEO_URL = `${BASE}/videos`;
+const VIDEO_URL = "/api/videos";
+const VIDEO_JOB_URL = `${BASE}/videos`;
 const SPEECH_URL = "/api/tts";
 const SPEECH_MODELS_URL = `${MODELS_URL}?output_modalities=speech`;
 const VIDEO_TERMINAL = new Set(["completed", "failed", "cancelled", "expired"]);
@@ -211,6 +212,14 @@ function tokenRate(model, { resolution, generateAudio } = {}) {
   return null;
 }
 
+function baseVideoRate(resolution) {
+  const label = String(resolution || "").toLowerCase();
+  if (label === "4k") return 0.03;
+  if (label === "1080p") return 0.015;
+  if (label === "720p") return 0.008;
+  return 0.005;
+}
+
 export function estimateVideoCost(model, { duration, resolution, aspectRatio, generateAudio } = {}) {
   if (!model || model.kind !== "video") return null;
   const seconds = Number(duration) || Number(model.durations?.[0]) || 0;
@@ -222,7 +231,7 @@ export function estimateVideoCost(model, { duration, resolution, aspectRatio, ge
     const size = videoSize(model, resolution, aspectRatio);
     return (size.width * size.height * seconds * 24 / 1024) * tokens;
   }
-  return null;
+  return baseVideoRate(resolution) * seconds * (generateAudio ? 1.25 : 1);
 }
 
 function rateLabel(value) {
@@ -255,7 +264,7 @@ export function formatVideoPrice(model) {
 export function formatVideoCost(value) {
   const amount = Number(value);
   if (!Number.isFinite(amount) || amount < 0) return "";
-  if (amount === 0) return "$0.00";
+  if (amount === 0) return "$0.000";
   if (amount < 0.01) return `$${amount.toFixed(4)}`;
   return `$${amount.toFixed(amount < 1 ? 3 : 2)}`;
 }
@@ -539,7 +548,7 @@ function safeVideoJobUrl(pollingUrl, id) {
   const polling = String(pollingUrl || "");
   if (polling.startsWith("https://openrouter.ai/api/v1/videos/")) return polling;
   if (polling.startsWith("/api/v1/videos/")) return `https://openrouter.ai${polling}`;
-  if (id) return `${VIDEO_URL}/${encodeURIComponent(id)}`;
+  if (id) return `${VIDEO_JOB_URL}/${encodeURIComponent(id)}`;
   return "";
 }
 
@@ -660,6 +669,18 @@ export function videoAudioReference(dataUrl) {
   const value = String(dataUrl || "");
   if (!value.startsWith("data:audio/")) return null;
   return { type: "audio_url", audio_url: { url: value } };
+}
+
+export function videoImageReference(dataUrl) {
+  const value = String(dataUrl || "");
+  if (!value.startsWith("data:image/")) return null;
+  return { type: "image_url", image_url: { url: value } };
+}
+
+export function videoVideoReference(dataUrl) {
+  const value = String(dataUrl || "");
+  if (!value.startsWith("data:video/")) return null;
+  return { type: "video_url", video_url: { url: value } };
 }
 
 export function speechAudioReference(dataUrl, transcript = "") {

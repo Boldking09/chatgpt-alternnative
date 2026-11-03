@@ -11,6 +11,8 @@ import {
   createSpeech,
   speechAudioReference,
   videoAudioReference,
+  videoImageReference,
+  videoVideoReference,
   fetchVideoJob,
   fetchVideoContent,
   waitForVideoGeneration,
@@ -76,6 +78,16 @@ const dom = {
   videoReferenceChip: $("#video-reference-chip"),
   videoReferenceName: $("#video-reference-name"),
   videoReferenceClear: $("#video-reference-clear"),
+  videoImageBtn: $("#video-image-btn"),
+  videoImageChip: $("#video-image-chip"),
+  videoImageName: $("#video-image-name"),
+  videoImageClear: $("#video-image-clear"),
+  videoImageInput: $("#video-image-input"),
+  videoVideoBtn: $("#video-video-btn"),
+  videoVideoChip: $("#video-video-chip"),
+  videoVideoName: $("#video-video-name"),
+  videoVideoClear: $("#video-video-clear"),
+  videoVideoInput: $("#video-video-input"),
   audioInput: $("#audio-input"),
   voiceDatalist: $("#speech-voices"),
   voiceoverDialog: $("#voiceover-dialog"),
@@ -119,6 +131,8 @@ const state = {
   speechReference: null,
   dashboardReference: null,
   videoReference: null,
+  videoImageReference: null,
+  videoVideoReference: null,
   voiceoverReference: null,
   audioTarget: "",
   voiceoverMessageId: null,
@@ -367,9 +381,18 @@ function renderDashboardReference() {
 }
 
 function renderVideoReference() {
-  const reference = state.videoReference;
-  if (dom.videoReferenceChip) dom.videoReferenceChip.hidden = !reference;
-  if (dom.videoReferenceName) dom.videoReferenceName.textContent = reference?.name || "";
+  const audio = state.videoReference;
+  const image = state.videoImageReference;
+  const video = state.videoVideoReference;
+  if (dom.videoReferenceChip) dom.videoReferenceChip.hidden = !audio;
+  if (dom.videoReferenceName) dom.videoReferenceName.textContent = audio?.name || "";
+  if (dom.videoImageChip) dom.videoImageChip.hidden = !image;
+  if (dom.videoImageName) dom.videoImageName.textContent = image?.name || "";
+  if (dom.videoVideoChip) dom.videoVideoChip.hidden = !video;
+  if (dom.videoVideoName) dom.videoVideoName.textContent = video?.name || "";
+  dom.videoImageBtn?.classList.toggle("set", Boolean(image));
+  dom.videoVideoBtn?.classList.toggle("set", Boolean(video));
+  dom.videoReferenceBtn?.classList.toggle("set", Boolean(audio));
 }
 
 function renderVoiceoverReference() {
@@ -438,6 +461,70 @@ async function applyAudioSample(file) {
     toast(`Added ${sample.name}`);
   } catch (error) {
     toast(error.message || "That audio file could not be used.");
+  }
+}
+
+function readVideoMedia(file, kind) {
+  return new Promise((resolve, reject) => {
+    if (!file) {
+      reject(new Error(kind === "image" ? "Choose an image." : "Choose a video."));
+      return;
+    }
+    const name = String(file.name || "").toLowerCase();
+    const isImage = file.type.startsWith("image/") || /\.(png|jpe?g|webp)$/.test(name);
+    const isVideo = file.type.startsWith("video/") || /\.(mp4|webm|mov)$/.test(name);
+    if (kind === "image" && !isImage) {
+      reject(new Error("Choose a PNG, JPEG, or WebP image."));
+      return;
+    }
+    if (kind === "video" && !isVideo) {
+      reject(new Error("Choose an MP4, WebM, or MOV video."));
+      return;
+    }
+    if (kind === "image" && file.size > 10 * 1024 * 1024) {
+      reject(new Error("Image samples must be smaller than 10 MB."));
+      return;
+    }
+    if (kind === "video" && file.size > 24 * 1024 * 1024) {
+      reject(new Error("Video samples must be smaller than 24 MB."));
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const prefix = kind === "image" ? "data:image/" : "data:video/";
+      if (typeof reader.result !== "string" || !reader.result.startsWith(prefix)) {
+        reject(new Error("That media file could not be read."));
+        return;
+      }
+      resolve({
+        data: reader.result,
+        name: file.name || (kind === "image" ? "Image sample" : "Video sample"),
+        size: file.size,
+        type: file.type,
+      });
+    };
+    reader.onerror = () => reject(new Error("That media file could not be read."));
+    reader.readAsDataURL(file);
+  });
+}
+
+function chooseVideoMedia(kind) {
+  const input = kind === "image" ? dom.videoImageInput : dom.videoVideoInput;
+  if (!input) return;
+  input.value = "";
+  input.click();
+}
+
+async function applyVideoMedia(file, kind) {
+  if (!file) return;
+  try {
+    const sample = await readVideoMedia(file, kind);
+    if (kind === "image") state.videoImageReference = sample;
+    else state.videoVideoReference = sample;
+    renderVideoReference();
+    toast(`Added ${sample.name}`);
+  } catch (error) {
+    toast(error.message || "That media file could not be used.");
   }
 }
 
@@ -524,6 +611,10 @@ function updateTokenHint() {
   dom.tokenHint.textContent = tokens >= 160 ? `~${tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : tokens} tokens` : "";
 }
 
+const STANDARD_VIDEO_DURATIONS = [3, 5, 10];
+const STANDARD_VIDEO_RESOLUTIONS = ["480p", "720p", "1080p"];
+const STANDARD_VIDEO_ASPECTS = ["16:9", "9:16", "1:1"];
+
 function nearestValue(values, value) {
   const number = Number(value);
   if (!values.length) return Number.isFinite(number) ? number : 0;
@@ -539,16 +630,16 @@ function clampVideoOptions(model, input = {}) {
 
   const duration = durations.length
     ? nearestValue(durations, input.duration ?? settings.videoDuration)
-    : Number(input.duration) || Number(settings.videoDuration) || 8;
+    : Number(input.duration) || Number(settings.videoDuration) || 3;
 
-  let resolution = input.resolution ?? settings.videoResolution;
-  if (!resolutions.includes(resolution)) {
-    resolution = resolutions.includes("720p") ? "720p" : resolutions[0] || "720p";
+  let resolution = input.resolution ?? settings.videoResolution ?? "480p";
+  if (resolutions.length && !resolutions.includes(resolution)) {
+    resolution = resolutions.includes("480p") ? "480p" : resolutions.includes("720p") ? "720p" : resolutions[0];
   }
 
-  let aspectRatio = input.aspectRatio ?? settings.videoAspectRatio;
-  if (!aspectRatios.includes(aspectRatio)) {
-    aspectRatio = aspectRatios.includes("16:9") ? "16:9" : aspectRatios[0] || "16:9";
+  let aspectRatio = input.aspectRatio ?? settings.videoAspectRatio ?? "16:9";
+  if (aspectRatios.length && !aspectRatios.includes(aspectRatio)) {
+    aspectRatio = aspectRatios.includes("16:9") ? "16:9" : aspectRatios[0];
   }
 
   return {
@@ -570,11 +661,30 @@ function videoOptionsFromControls() {
   });
 }
 
-function fillVideoSelect(select, values, label) {
+function videoSelectRows(preferred, supported) {
+  const values = [...new Set([...preferred, ...supported])];
+  return values.map((value) => ({
+    value,
+    disabled: supported.length > 0 && !supported.includes(value),
+  }));
+}
+
+function fillVideoSelect(select, rows, label) {
   if (!select) return;
-  select.innerHTML = values
-    .map((value) => `<option value="${escapeHtml(String(value))}">${escapeHtml(label(value))}</option>`)
+  select.innerHTML = rows
+    .map(({ value, disabled }) => `<option value="${escapeHtml(String(value))}"${disabled ? " disabled" : ""}>${escapeHtml(label(value))}</option>`)
     .join("");
+}
+
+function videoPromptFactor(prompt) {
+  const characters = String(prompt || "").trim().length;
+  if (!characters) return 1;
+  return 1 + Math.min(0.2, characters / 5000 * 0.2);
+}
+
+function estimatedVideoCost(model, options, prompt = dom.input?.value) {
+  const base = estimateVideoCost(model, options);
+  return base === null ? null : base * videoPromptFactor(prompt);
 }
 
 function updateVideoEstimate(options = videoOptionsFromControls()) {
@@ -585,11 +695,11 @@ function updateVideoEstimate(options = videoOptionsFromControls()) {
     dom.videoEstimate.title = "";
     return;
   }
-  const cost = estimateVideoCost(model, options);
-  dom.videoEstimate.textContent = cost === null ? "" : `Est. ${formatVideoCost(cost)}`;
+  const cost = estimatedVideoCost(model, options);
+  dom.videoEstimate.textContent = cost === null ? "Est. unavailable" : `Est. ${formatVideoCost(cost)}`;
   dom.videoEstimate.title = cost === null
     ? "Pricing is not published for this model."
-    : `Estimated for ${options.duration}s at ${options.resolution}${options.generateAudio ? " with audio" : ""}. Final cost may differ.`;
+    : `Estimated for ${options.duration}s at ${options.resolution}${options.generateAudio ? " with audio" : ""}, including prompt detail. Final cost may differ.`;
 }
 
 function syncVideoOptions() {
@@ -604,10 +714,16 @@ function syncVideoOptions() {
     return;
   }
 
-  const durations = model.durations?.length ? model.durations : [Number(store.settings().videoDuration) || 8];
-  const resolutions = model.resolutions?.length ? model.resolutions : [store.settings().videoResolution || "720p"];
-  const aspectRatios = model.aspectRatios?.length ? model.aspectRatios : [store.settings().videoAspectRatio || "16:9"];
-  const signature = [model.id, durations.join(","), resolutions.join(","), aspectRatios.join(","), Boolean(model.generateAudio)].join("|");
+  const durations = videoSelectRows(STANDARD_VIDEO_DURATIONS, model.durations || []);
+  const resolutions = videoSelectRows(STANDARD_VIDEO_RESOLUTIONS, model.resolutions || []);
+  const aspectRatios = videoSelectRows(STANDARD_VIDEO_ASPECTS, model.aspectRatios || []);
+  const signature = [
+    model.id,
+    durations.map((item) => `${item.value}:${item.disabled}`).join(","),
+    resolutions.map((item) => `${item.value}:${item.disabled}`).join(","),
+    aspectRatios.map((item) => `${item.value}:${item.disabled}`).join(","),
+    Boolean(model.generateAudio),
+  ].join("|");
 
   if (dom.videoOptions.dataset.signature !== signature) {
     fillVideoSelect(dom.videoAspect, aspectRatios, (value) => value);
@@ -626,8 +742,15 @@ function syncVideoOptions() {
   if (dom.videoDuration) dom.videoDuration.value = String(options.duration);
   if (dom.videoResolution) dom.videoResolution.value = options.resolution;
   if (dom.videoAspect) dom.videoAspect.value = options.aspectRatio;
-  if (dom.videoAudioRow) dom.videoAudioRow.hidden = !model.generateAudio;
-  if (dom.videoAudio) dom.videoAudio.checked = options.generateAudio;
+  if (dom.videoAudioRow) {
+    dom.videoAudioRow.hidden = false;
+    dom.videoAudioRow.classList.toggle("unsupported", !model.generateAudio);
+  }
+  if (dom.videoAudio) {
+    dom.videoAudio.disabled = !model.generateAudio;
+    dom.videoAudio.checked = options.generateAudio;
+    dom.videoAudio.title = model.generateAudio ? "" : "This model does not generate audio.";
+  }
 
   const settings = store.settings();
   if (
@@ -2056,7 +2179,12 @@ async function runVideoGeneration(conversationId, assistantId, prompt, model, pr
   updateComposerState();
 
   const options = clampVideoOptions(model, preferred);
-  const estimatedCost = estimateVideoCost(model, options);
+  const estimatedCost = estimatedVideoCost(model, options, prompt);
+  const inputReferences = [
+    state.videoImageReference ? videoImageReference(state.videoImageReference.data) : null,
+    state.videoVideoReference ? videoVideoReference(state.videoVideoReference.data) : null,
+    state.videoReference ? videoAudioReference(state.videoReference.data) : null,
+  ].filter(Boolean);
   let latest = null;
 
   const persist = (video) => {
@@ -2077,7 +2205,7 @@ async function runVideoGeneration(conversationId, assistantId, prompt, model, pr
       resolution: options.resolution,
       aspectRatio: options.aspectRatio,
       generateAudio: options.generateAudio,
-      inputReferences: state.videoReference ? [videoAudioReference(state.videoReference.data)] : [],
+      inputReferences,
       signal: controller.signal,
     });
 
@@ -2918,6 +3046,7 @@ function bindEvents() {
     autoGrow();
     updateComposerState();
     updateSpeechEstimate();
+    updateVideoEstimate();
   });
 
   dom.input.addEventListener("keydown", (event) => {
@@ -2958,7 +3087,12 @@ function bindEvents() {
 
   dom.speechReferenceBtn?.addEventListener("click", () => chooseAudioSample("speech"));
   dom.videoReferenceBtn?.addEventListener("click", () => chooseAudioSample("video"));
+  dom.videoImageBtn?.addEventListener("click", () => chooseVideoMedia("image"));
+  dom.videoVideoBtn?.addEventListener("click", () => chooseVideoMedia("video"));
   dom.voiceoverReferenceBtn?.addEventListener("click", () => chooseAudioSample("voiceover"));
+
+  dom.videoImageInput?.addEventListener("change", () => applyVideoMedia(dom.videoImageInput.files?.[0], "image"));
+  dom.videoVideoInput?.addEventListener("change", () => applyVideoMedia(dom.videoVideoInput.files?.[0], "video"));
 
   dom.speechReferenceClear?.addEventListener("click", () => {
     state.speechReference = null;
@@ -2967,6 +3101,14 @@ function bindEvents() {
   });
   dom.videoReferenceClear?.addEventListener("click", () => {
     state.videoReference = null;
+    renderVideoReference();
+  });
+  dom.videoImageClear?.addEventListener("click", () => {
+    state.videoImageReference = null;
+    renderVideoReference();
+  });
+  dom.videoVideoClear?.addEventListener("click", () => {
+    state.videoVideoReference = null;
     renderVideoReference();
   });
   dom.voiceoverReferenceClear?.addEventListener("click", () => {

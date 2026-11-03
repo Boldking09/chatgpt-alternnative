@@ -120,43 +120,6 @@
       <div class="composer-wrap" id="composer-wrap">
         <form class="composer" id="composer" autocomplete="off">
           <div class="attachments" id="attachments" hidden></div>
-          <div class="video-options" id="video-options" hidden>
-            <div class="video-options-head">
-              <span class="video-options-title"><svg class="icon"><use href="#i-image"/></svg>Video settings</span>
-              <span class="video-estimate" id="video-estimate"></span>
-            </div>
-            <div class="video-option-grid">
-              <label class="video-option">
-                <span>Aspect ratio</span>
-                <select id="video-aspect" aria-label="Video aspect ratio"></select>
-              </label>
-              <label class="video-option">
-                <span>Duration</span>
-                <select id="video-duration" aria-label="Video duration"></select>
-              </label>
-              <label class="video-option">
-                <span>Resolution</span>
-                <select id="video-resolution" aria-label="Video resolution"></select>
-              </label>
-              <label class="video-audio-toggle" id="video-audio-row">
-                <input type="checkbox" id="video-audio">
-                <span>Generate audio</span>
-              </label>
-            </div>
-            <div class="reference-row" id="video-reference-row">
-              <button type="button" class="chip-btn" id="video-reference-btn" title="Add a reference audio sample">
-                <svg class="icon"><use href="#i-mic"/></svg>
-                <span>Audio sample</span>
-              </button>
-              <span class="reference-chip" id="video-reference-chip" hidden>
-                <span id="video-reference-name"></span>
-                <button type="button" class="reference-clear" id="video-reference-clear" aria-label="Remove audio sample">
-                  <svg class="icon"><use href="#i-x"/></svg>
-                </button>
-              </span>
-              <span class="reference-help">Used by supporting video models.</span>
-            </div>
-          </div>
           <div class="speech-options" id="speech-options" hidden>
             <div class="video-options-head">
               <span class="video-options-title"><svg class="icon"><use href="#i-mic"/></svg>Speech settings</span>
@@ -196,6 +159,77 @@
           </div>
           <label class="sr-only" for="input">Message OURCHAT</label>
           <textarea id="input" rows="1" placeholder="Ask anything" maxlength="32000"></textarea>
+          <div class="video-options video-panel" id="video-options" hidden>
+            <div class="video-options-head">
+              <span class="video-panel-heading">
+                <span class="video-panel-icon"><svg class="icon"><use href="#i-film"/></svg></span>
+                <span class="video-panel-copy">
+                  <span class="video-options-title">Video generation</span>
+                  <span class="video-panel-sub">Direct the shot and check the estimate</span>
+                </span>
+              </span>
+              <span class="video-estimate" id="video-estimate" aria-live="polite">Est. $0.000</span>
+            </div>
+            <div class="video-reference-block">
+              <span class="video-section-label">Reference media</span>
+              <div class="video-reference-actions">
+                <button type="button" class="chip-btn" id="video-image-btn" title="Add a reference image">
+                  <svg class="icon"><use href="#i-image"/></svg>
+                  <span>Image sample</span>
+                </button>
+                <button type="button" class="chip-btn" id="video-video-btn" title="Add a reference video">
+                  <svg class="icon"><use href="#i-film"/></svg>
+                  <span>Video sample</span>
+                </button>
+              </div>
+              <div class="video-reference-chips">
+                <span class="reference-chip" id="video-image-chip" hidden>
+                  <span id="video-image-name"></span>
+                  <button type="button" class="reference-clear" id="video-image-clear" aria-label="Remove image sample">
+                    <svg class="icon"><use href="#i-x"/></svg>
+                  </button>
+                </span>
+                <span class="reference-chip" id="video-video-chip" hidden>
+                  <span id="video-video-name"></span>
+                  <button type="button" class="reference-clear" id="video-video-clear" aria-label="Remove video sample">
+                    <svg class="icon"><use href="#i-x"/></svg>
+                  </button>
+                </span>
+              </div>
+              <span class="reference-help">Image or video guidance for supporting models.</span>
+            </div>
+            <div class="video-option-grid">
+              <label class="video-option">
+                <span>Aspect ratio</span>
+                <select id="video-aspect" aria-label="Video aspect ratio"></select>
+              </label>
+              <label class="video-option">
+                <span>Duration</span>
+                <select id="video-duration" aria-label="Video duration"></select>
+              </label>
+              <label class="video-option">
+                <span>Resolution</span>
+                <select id="video-resolution" aria-label="Video resolution"></select>
+              </label>
+            </div>
+            <div class="video-audio-row">
+              <label class="video-audio-toggle" id="video-audio-row">
+                <input type="checkbox" id="video-audio">
+                <span>Generate audio</span>
+              </label>
+              <button type="button" class="chip-btn" id="video-reference-btn" title="Add a reference audio sample">
+                <svg class="icon"><use href="#i-mic"/></svg>
+                <span>Audio sample</span>
+              </button>
+              <span class="reference-chip" id="video-reference-chip" hidden>
+                <span id="video-reference-name"></span>
+                <button type="button" class="reference-clear" id="video-reference-clear" aria-label="Remove audio sample">
+                  <svg class="icon"><use href="#i-x"/></svg>
+                </button>
+              </span>
+            </div>
+            <span class="video-audio-help">Audio samples up to 12 MB, on supporting models only.</span>
+          </div>
           <div class="composer-bar">
             <div class="composer-left">
               <button type="button" class="icon-btn soft" id="attach-btn" title="Attach images" aria-label="Attach images">
@@ -416,6 +450,8 @@
   <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
   <input type="file" id="file-input" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
   <input type="file" id="audio-input" accept="audio/*,.wav,.mp3,.m4a,.ogg,.webm" hidden>
+  <input type="file" id="video-image-input" accept="image/png,image/jpeg,image/webp" hidden>
+  <input type="file" id="video-video-input" accept="video/mp4,video/webm,video/quicktime" hidden>
   <datalist id="speech-voices"></datalist>
 
   <script type="module" src="./js/app.js"></script>
