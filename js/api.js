@@ -2,9 +2,11 @@ const BASE = "https://openrouter.ai/api/v1";
 const MODELS_URL = `${BASE}/models`;
 const CHAT_URL = `${BASE}/chat/completions`;
 const VIDEO_MODELS_URL = `${BASE}/videos/models`;
+const IMAGE_MODELS_URL = `${BASE}/images/models`;
 const VIDEO_URL = "/api/videos";
 const VIDEO_JOB_URL = `${BASE}/videos`;
 const SPEECH_URL = "/api/tts";
+const CINEMATIC_URL = "/api/cinematic";
 const SPEECH_MODELS_URL = `${MODELS_URL}?output_modalities=speech`;
 const VIDEO_TERMINAL = new Set(["completed", "failed", "cancelled", "expired"]);
 
@@ -107,6 +109,39 @@ export function normalizeSpeechModels(payload) {
     .filter(Boolean);
 }
 
+export function normalizeImageModels(payload) {
+  const list = Array.isArray(payload?.data) ? payload.data : Array.isArray(payload) ? payload : [];
+  return list
+    .filter((model) => model && typeof model.id === "string")
+    .map((model) => {
+      const inputs = Array.isArray(model.architecture?.input_modalities)
+        ? model.architecture.input_modalities
+        : [];
+      const outputs = Array.isArray(model.architecture?.output_modalities)
+        ? model.architecture.output_modalities
+        : [];
+      const params = model.supported_parameters || {};
+      const refRange = params.input_references || {};
+      const maxReferences = Number.isFinite(Number(refRange.max))
+        ? Number(refRange.max)
+        : inputs.includes("image") ? 1 : 0;
+      return {
+        id: model.id,
+        name: typeof model.name === "string" && model.name ? model.name : model.id,
+        description: typeof model.description === "string" ? model.description : "",
+        references: maxReferences > 0,
+        maxReferences,
+        aspectRatios: Array.isArray(params.aspect_ratio?.values) ? params.aspect_ratio.values : [],
+        resolutions: Array.isArray(params.resolution?.values) ? params.resolution.values : [],
+        endpoints: typeof model.endpoints === "string" ? model.endpoints : "",
+        created: Number(model.created) || 0,
+        kind: "image",
+        outputs,
+      };
+    })
+    .filter((model) => model.outputs.includes("image"));
+}
+
 function skuNumber(value) {
   const number = Number.parseFloat(value);
   return Number.isFinite(number) && number >= 0 ? number : null;
@@ -197,7 +232,13 @@ function perSecondRate(model, { resolution, generateAudio } = {}) {
 function tokenRate(model, { resolution, generateAudio } = {}) {
   const keys = model.pricingSkus || {};
   const label = String(resolution || "").toLowerCase();
-  const byResolution = label === "1080p" ? "video_tokens_1080p" : label === "4k" ? "video_tokens_4k" : "";
+  const byResolution = label === "1080p"
+    ? "video_tokens_1080p"
+    : label === "2k"
+      ? "video_tokens_2k"
+      : label === "4k"
+        ? "video_tokens_4k"
+        : "";
   const candidates = [
     ...(byResolution ? [byResolution] : []),
     ...(generateAudio === false ? ["video_tokens_without_audio"] : []),
@@ -215,6 +256,7 @@ function tokenRate(model, { resolution, generateAudio } = {}) {
 function baseVideoRate(resolution) {
   const label = String(resolution || "").toLowerCase();
   if (label === "4k") return 0.03;
+  if (label === "2k") return 0.02;
   if (label === "1080p") return 0.015;
   if (label === "720p") return 0.008;
   return 0.005;
@@ -335,6 +377,83 @@ export async function fetchSpeechModels(apiKey = "") {
   }
   if (!response.ok) throw new Error(`Speech model catalog: ${await errorMessage(response)}`);
   return normalizeSpeechModels(await response.json());
+}
+
+export async function fetchImageModels(apiKey = "") {
+  let response;
+  try {
+    response = await fetch(IMAGE_MODELS_URL, { headers: headers(apiKey) });
+  } catch (error) {
+    throw new Error(`Could not reach OpenRouter image models (${error.message || "network error"}).`);
+  }
+  if (!response.ok) throw new Error(`Image model catalog: ${await errorMessage(response)}`);
+  return normalizeImageModels(await response.json());
+}
+
+export async function fetchImageModelPricing(apiKey, id) {
+  const model = String(id || "").trim();
+  if (!model) return [];
+  const path = model.split("/").map((part) => encodeURIComponent(part)).join("/");
+  const url = `${IMAGE_MODELS_URL}/${path}/endpoints`;
+  let response;
+  try {
+    response = await fetch(url, { headers: headers(apiKey) });
+  } catch (error) {
+    throw new Error(`Could not reach image pricing (${error.message || "network error"}).`);
+  }
+  if (!response.ok) throw new Error(`Image pricing: ${await errorMessage(response)}`);
+  const payload = await response.json();
+  const endpoints = Array.isArray(payload?.endpoints) ? payload.endpoints : [];
+  return endpoints
+    .map((endpoint) => {
+      const lines = Array.isArray(endpoint?.pricing) ? endpoint.pricing : [];
+      const costs = lines
+        .map((line) => ({
+          billable: typeof line?.billable === "string" ? line.billable : "",
+          unit: typeof line?.unit === "string" ? line.unit : "",
+          cost: Number(line?.cost_usd),
+          variant: typeof line?.variant === "string" ? line.variant : "",
+        }))
+        .filter((line) => Number.isFinite(line.cost) && line.cost >= 0);
+      if (!costs.length) return null;
+      const base = new Map();
+      for (const line of costs) {
+        const current = base.get(line.billable);
+        if (!current || (current.variant && !line.variant)) base.set(line.billable, line);
+      }
+      const unique = [...base.values()];
+      return {
+        provider: typeof endpoint?.provider_name === "string" ? endpoint.provider_name : "",
+        costs: unique,
+      };
+    })
+    .filter(Boolean);
+}
+
+export function estimateImageCost(endpoints, { references = 2 } = {}) {
+  if (!Array.isArray(endpoints) || !endpoints.length) return null;
+  const totals = endpoints.map((endpoint) => {
+    const base = new Map();
+    for (const line of endpoint.costs || []) {
+      const current = base.get(line.billable);
+      if (!current || (current.variant && !line.variant)) base.set(line.billable, line);
+    }
+    let total = 0;
+    let found = false;
+    for (const line of base.values()) {
+      const count = line.billable === "output_image"
+        ? 1
+        : line.billable === "input_reference" || line.billable === "input_image"
+          ? Math.max(0, references)
+          : 0;
+      if (!count) continue;
+      total += line.cost * count;
+      found = true;
+    }
+    return found ? total : null;
+  }).filter((value) => value !== null);
+  if (!totals.length) return null;
+  return Math.min(...totals);
 }
 
 export async function fetchModels(apiKey = "") {
@@ -690,6 +809,88 @@ export function speechAudioReference(dataUrl, transcript = "") {
   const text = String(transcript || "").trim();
   if (text) parts.push({ type: "text", text: text.slice(0, 10000) });
   return parts;
+}
+
+export function base64ToBlob(base64, type = "application/octet-stream") {
+  const clean = String(base64 || "").replace(/\s+/g, "");
+  if (!clean) throw new Error("The returned audio was empty.");
+  const binary = atob(clean);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return new Blob([bytes], { type: type || "application/octet-stream" });
+}
+
+export async function createCinematicEdit({
+  apiKey,
+  scriptModel,
+  speechModel,
+  videoModel,
+  wardrobeModel,
+  wardrobePrompt,
+  outfitImage,
+  lipSync,
+  prompt,
+  duration,
+  resolution,
+  aspectRatio,
+  clips,
+  audioSample,
+  referenceFrame,
+  transcript,
+  voice,
+  instructions,
+  speed,
+  signal,
+}) {
+  const body = {
+    script_model: scriptModel,
+    speech_model: speechModel,
+    video_model: videoModel,
+    prompt,
+    duration: Number(duration),
+    resolution,
+    aspect_ratio: aspectRatio,
+    clips,
+    audio_sample: audioSample,
+  };
+  if (referenceFrame) body.reference_frame = referenceFrame;
+  if (wardrobeModel) body.wardrobe_model = wardrobeModel;
+  if (outfitImage) body.outfit_image = outfitImage;
+  const styling = String(wardrobePrompt || "").trim();
+  if (styling) body.wardrobe_prompt = styling;
+  if (lipSync) body.lip_sync = true;
+  const sampleText = String(transcript || "").trim();
+  if (sampleText) body.transcript = sampleText;
+  if (voice) body.voice = voice;
+  const delivery = String(instructions || "").trim();
+  if (delivery) body.instructions = delivery;
+  const rate = Number(speed);
+  if (Number.isFinite(rate) && rate > 0 && rate !== 1) body.speed = rate;
+
+  let response;
+  try {
+    response = await fetch(CINEMATIC_URL, {
+      method: "POST",
+      headers: headers(apiKey),
+      body: JSON.stringify(body),
+      signal,
+    });
+  } catch (error) {
+    if (error.name === "AbortError") throw error;
+    throw new Error(`Network error — ${error.message || "could not reach the studio service"}.`);
+  }
+  if (!response.ok) throw new Error(await errorMessage(response));
+  const payload = await response.json();
+  if (payload?.error) {
+    throw new Error(payload.error.message || payload.error || "The studio service returned an error.");
+  }
+  if (typeof payload?.script !== "string" || !payload.script.trim()) {
+    throw new Error("The studio service returned no voiceover script.");
+  }
+  if (!payload?.audio?.data) throw new Error("The studio service returned no voiceover audio.");
+  return payload;
 }
 
 export async function createSpeech({

@@ -13,15 +13,22 @@ export const DEFAULT_SETTINGS = {
   showReasoning: true,
   sendOnEnter: true,
   theme: "system",
-  videoDuration: 3,
-  videoResolution: "480p",
+  videoDuration: 50,
+  videoResolution: "1080p",
   videoAspectRatio: "16:9",
   videoAudio: false,
+  videoDefaultsVersion: 2,
   speechModel: "mistralai/voxtral-mini-tts-3-0",
   speechVoice: "",
   speechSpeed: 1,
   speechInstructions: "",
 };
+
+function formatDuration(value) {
+  const seconds = Number(value);
+  if (seconds >= 60 && seconds % 60 === 0) return `${seconds / 60}m`;
+  return `${seconds}s`;
+}
 
 function read(key, fallback) {
   try {
@@ -66,6 +73,12 @@ function sanitizeSettings(input) {
   settings.videoResolution = typeof settings.videoResolution === "string" ? settings.videoResolution : DEFAULT_SETTINGS.videoResolution;
   settings.videoAspectRatio = typeof settings.videoAspectRatio === "string" ? settings.videoAspectRatio : DEFAULT_SETTINGS.videoAspectRatio;
   settings.videoAudio = settings.videoAudio === true;
+  const videoDefaultsVersion = Number(input?.videoDefaultsVersion) || 1;
+  if (videoDefaultsVersion < 2) {
+    if (settings.videoDuration === 3) settings.videoDuration = DEFAULT_SETTINGS.videoDuration;
+    if (settings.videoResolution === "480p") settings.videoResolution = DEFAULT_SETTINGS.videoResolution;
+  }
+  settings.videoDefaultsVersion = DEFAULT_SETTINGS.videoDefaultsVersion;
   settings.speechModel = typeof settings.speechModel === "string" ? settings.speechModel : DEFAULT_SETTINGS.speechModel;
   settings.speechVoice = typeof settings.speechVoice === "string" ? settings.speechVoice : "";
   const speechSpeed = Number(settings.speechSpeed);
@@ -332,7 +345,7 @@ export function exportConversation(conversation) {
       const video = message.video;
       lines.push(
         "",
-        `_Video job ${video.jobId} · ${video.status}${video.duration ? ` · ${video.duration}s` : ""}${
+        `_Video job ${video.jobId} · ${video.status}${video.duration ? ` · ${formatDuration(video.duration)}` : ""}${
           video.resolution ? ` · ${video.resolution}` : ""
         }${video.aspectRatio ? ` · ${video.aspectRatio}` : ""}${video.cost != null ? ` · $${video.cost.toFixed(4)}` : ""}_`
       );

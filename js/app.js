@@ -5,10 +5,15 @@ import {
   fetchModels,
   fetchVideoModels,
   fetchSpeechModels,
+  fetchImageModels,
+  fetchImageModelPricing,
+  estimateImageCost,
   streamCompletion,
   completeChat,
   createVideoGeneration,
   createSpeech,
+  createCinematicEdit,
+  base64ToBlob,
   speechAudioReference,
   videoAudioReference,
   videoImageReference,
@@ -44,6 +49,10 @@ const dom = {
   modelBadge: $("#model-badge"),
   conversationList: $("#conversation-list"),
   dashboardRow: $("#dashboard-row"),
+  cinematicRow: $("#cinematic-row"),
+  cinematicClipsInput: $("#cinematic-clips-input"),
+  cinematicAudioInput: $("#cinematic-audio-input"),
+  cinematicOutfitInput: $("#cinematic-outfit-input"),
   toast: $("#toast"),
   promptLabel: $("#prompt-label"),
   promptBtn: $("#prompt-btn"),
@@ -108,6 +117,7 @@ const dom = {
 const state = {
   conversationId: null,
   dashboard: false,
+  cinematic: false,
   sending: false,
   controller: null,
   models: [],
@@ -139,6 +149,27 @@ const state = {
   voiceoverConversationId: null,
   voiceoverController: null,
   voiceoverBusy: false,
+  imageModels: [],
+  imageModelsLoading: false,
+  imageModelsError: "",
+  cinematicClips: [],
+  cinematicAudio: null,
+  cinematicOutfit: null,
+  cinematicPrompt: "",
+  cinematicWardrobeModel: "",
+  cinematicWardrobePrompt: "",
+  cinematicWardrobePricing: null,
+  cinematicWardrobePricingFor: "",
+  cinematicLipSync: false,
+  cinematicDelivery: "",
+  cinematicResult: null,
+  cinematicBusy: false,
+  cinematicController: null,
+  cinematicStage: "",
+  cinematicError: "",
+  cinematicScriptModel: "",
+  cinematicSpeechModel: "",
+  cinematicVideoModel: "",
 };
 
 const mqDark = matchMedia("(prefers-color-scheme: dark)");
@@ -567,6 +598,12 @@ function updateAccount() {
 }
 
 function updateTopbar() {
+  if (state.cinematic) {
+    dom.modelPickerName.textContent = "Cinematic Real Estate Studio";
+    dom.modelPickerName.title = "AI voiceover and B-roll studio";
+    dom.modelBadge.hidden = true;
+    return;
+  }
   if (state.dashboard) {
     dom.modelPickerName.textContent = "Studio dashboard";
     dom.modelPickerName.title = "Speech, video, and voice cloning";
@@ -586,7 +623,7 @@ function updateTopbar() {
 }
 
 function updateChrome() {
-  if (state.dashboard) {
+  if (state.dashboard || state.cinematic) {
     dom.composerWrap.hidden = true;
     updateTopbar();
     updateAccount();
@@ -611,8 +648,8 @@ function updateTokenHint() {
   dom.tokenHint.textContent = tokens >= 160 ? `~${tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : tokens} tokens` : "";
 }
 
-const STANDARD_VIDEO_DURATIONS = [3, 5, 10];
-const STANDARD_VIDEO_RESOLUTIONS = ["480p", "720p", "1080p"];
+const STANDARD_VIDEO_DURATIONS = [3, 15, 50, 60, 120];
+const STANDARD_VIDEO_RESOLUTIONS = ["480p", "720p", "1080p", "2k", "4k"];
 const STANDARD_VIDEO_ASPECTS = ["16:9", "9:16", "1:1"];
 
 function nearestValue(values, value) {
@@ -630,11 +667,11 @@ function clampVideoOptions(model, input = {}) {
 
   const duration = durations.length
     ? nearestValue(durations, input.duration ?? settings.videoDuration)
-    : Number(input.duration) || Number(settings.videoDuration) || 3;
+    : Number(input.duration) || Number(settings.videoDuration) || 50;
 
-  let resolution = input.resolution ?? settings.videoResolution ?? "480p";
+  let resolution = input.resolution ?? settings.videoResolution ?? "1080p";
   if (resolutions.length && !resolutions.includes(resolution)) {
-    resolution = resolutions.includes("480p") ? "480p" : resolutions.includes("720p") ? "720p" : resolutions[0];
+    resolution = ["1080p", "720p", "480p", "2k", "4k"].find((value) => resolutions.includes(value)) || resolutions[0];
   }
 
   let aspectRatio = input.aspectRatio ?? settings.videoAspectRatio ?? "16:9";
@@ -676,6 +713,12 @@ function fillVideoSelect(select, rows, label) {
     .join("");
 }
 
+function durationLabel(value) {
+  const seconds = Number(value);
+  if (seconds >= 60 && seconds % 60 === 0) return `${seconds / 60}m`;
+  return `${seconds}s`;
+}
+
 function videoPromptFactor(prompt) {
   const characters = String(prompt || "").trim().length;
   if (!characters) return 1;
@@ -699,7 +742,7 @@ function updateVideoEstimate(options = videoOptionsFromControls()) {
   dom.videoEstimate.textContent = cost === null ? "Est. unavailable" : `Est. ${formatVideoCost(cost)}`;
   dom.videoEstimate.title = cost === null
     ? "Pricing is not published for this model."
-    : `Estimated for ${options.duration}s at ${options.resolution}${options.generateAudio ? " with audio" : ""}, including prompt detail. Final cost may differ.`;
+    : `Estimated for ${durationLabel(options.duration)} at ${options.resolution}${options.generateAudio ? " with audio" : ""}, including prompt detail. Final cost may differ.`;
 }
 
 function syncVideoOptions() {
@@ -727,16 +770,17 @@ function syncVideoOptions() {
 
   if (dom.videoOptions.dataset.signature !== signature) {
     fillVideoSelect(dom.videoAspect, aspectRatios, (value) => value);
-    fillVideoSelect(dom.videoDuration, durations, (value) => `${value}s`);
+    fillVideoSelect(dom.videoDuration, durations, durationLabel);
     fillVideoSelect(dom.videoResolution, resolutions, (value) => value);
     dom.videoOptions.dataset.signature = signature;
   }
 
+  const saved = store.settings();
   const options = clampVideoOptions(model, {
-    duration: dom.videoDuration?.value,
-    resolution: dom.videoResolution?.value,
-    aspectRatio: dom.videoAspect?.value,
-    generateAudio: Boolean(dom.videoAudio?.checked) || Boolean(store.settings().videoAudio),
+    duration: saved.videoDuration,
+    resolution: saved.videoResolution,
+    aspectRatio: saved.videoAspectRatio,
+    generateAudio: saved.videoAudio,
   });
 
   if (dom.videoDuration) dom.videoDuration.value = String(options.duration);
@@ -752,12 +796,11 @@ function syncVideoOptions() {
     dom.videoAudio.title = model.generateAudio ? "" : "This model does not generate audio.";
   }
 
-  const settings = store.settings();
   if (
-    settings.videoDuration !== options.duration ||
-    settings.videoResolution !== options.resolution ||
-    settings.videoAspectRatio !== options.aspectRatio ||
-    settings.videoAudio !== options.generateAudio
+    saved.videoDuration !== options.duration ||
+    saved.videoResolution !== options.resolution ||
+    saved.videoAspectRatio !== options.aspectRatio ||
+    saved.videoAudio !== options.generateAudio
   ) {
     store.saveSettings({
       videoDuration: options.duration,
@@ -899,6 +942,7 @@ function conversationRow(conversation) {
 
 function renderSidebar() {
   dom.dashboardRow?.classList.toggle("active", state.dashboard);
+  dom.cinematicRow?.classList.toggle("active", state.cinematic);
   const items = store.conversations();
   if (!items.length) {
     dom.conversationList.innerHTML = `<div class="conv-empty">Your chats will appear here.</div>`;
@@ -1104,8 +1148,24 @@ function renderModels() {
   dom.modelsList.innerHTML = html.join("");
 }
 
+async function loadImageModels(force = false) {
+  if (state.imageModelsLoading) return;
+  if (!force && state.imageModels.length) return;
+  state.imageModelsLoading = true;
+  state.imageModelsError = "";
+  try {
+    state.imageModels = await fetchImageModels(store.settings().apiKey);
+    if (state.cinematic) renderCinematic();
+  } catch (error) {
+    state.imageModelsError = error.message || "Image models could not be loaded.";
+  } finally {
+    state.imageModelsLoading = false;
+  }
+}
+
 async function loadModels(force = false) {
   if (state.modelsLoading) return;
+  if (!state.imageModels.length) void loadImageModels();
   const cache = store.cachedModels();
   if (!force && !state.models.length && cache && !cache.stale) {
     state.models = cache.models;
@@ -1250,7 +1310,7 @@ function videoCardHtml(message) {
   const cached = state.videoCache.get(video.jobId);
   const busy = state.videoLoading.has(video.jobId);
   const label = VIDEO_STATUS_LABELS[video.status] || "Working";
-  const detail = [video.duration ? `${video.duration}s` : "", video.resolution, video.aspectRatio, video.generateAudio ? "audio" : ""]
+  const detail = [video.duration ? durationLabel(video.duration) : "", video.resolution, video.aspectRatio, video.generateAudio ? "audio" : ""]
     .filter(Boolean)
     .join(" · ");
   const cost = Number(video.cost) > 0
@@ -1771,6 +1831,23 @@ function renderDashboard() {
     </div>
 
     <div class="dash-grid">
+      <section class="dash-card dash-wide dash-cinematic">
+        <div class="dash-card-head">
+          <span class="dash-icon"><svg class="icon"><use href="#i-film"/></svg></span>
+          <div>
+            <h2>Cinematic Real Estate Studio</h2>
+            <p>Upload listing clips, clone a voice sample, and produce a scored voiceover plus new AI B-roll.</p>
+          </div>
+        </div>
+        <div class="dash-cinematic-actions">
+          <button type="button" class="btn primary" data-dash-action="cinematic">
+            <svg class="icon"><use href="#i-film"/></svg>
+            <span>Open cinematic studio</span>
+          </button>
+          <span class="reference-help">Premium timeline editing workspace · voiceover + B-roll</span>
+        </div>
+      </section>
+
       <section class="dash-card">
         <div class="dash-card-head">
           <span class="dash-icon"><svg class="icon"><use href="#i-spark"/></svg></span>
@@ -1915,6 +1992,11 @@ function dashboardStart(kind) {
 
 function handleDashboardAction(button) {
   const action = button.dataset.dashAction;
+  if (action === "cinematic") {
+    navigate("#/cinematic");
+    closeMobileSidebar();
+    return;
+  }
   if (action === "chat" || action === "video" || action === "speech" || action === "clone") {
     dashboardStart(action);
     return;
@@ -1937,6 +2019,1059 @@ function handleDashboardAction(button) {
     void loadModels(true).then(() => {
       if (state.dashboard) renderDashboard();
     });
+  }
+}
+
+/* ---------------- Cinematic studio ---------------- */
+
+const CINEMATIC_CLIP_LIMIT = 6;
+const CINEMATIC_CLIP_BYTES = 24 * 1024 * 1024;
+const CINEMATIC_TOTAL_BYTES = 36 * 1024 * 1024;
+const CINEMATIC_OUTFIT_BYTES = 10 * 1024 * 1024;
+
+const CINEMATIC_EXAMPLES = [
+  {
+    label: "Oceanfront listing",
+    prompt: "Luxury oceanfront listing at golden hour. Drone push over turquoise water, slow interior glide through floor-to-ceiling glass, warm poolside shots, elegant text-free B-roll.",
+  },
+  {
+    label: "Modern villa",
+    prompt: "Modern hillside villa at dusk. Cinematic drone orbit, warm architectural lighting, marble interiors, infinity pool reflections, smooth gimbal walkthrough.",
+  },
+  {
+    label: "City penthouse",
+    prompt: "Downtown penthouse at blue hour. Skyline views, moody interior lamps, slow dolly across the living room, rooftop terrace, refined real-estate commercial style.",
+  },
+];
+
+function cinematicClipAccept(file) {
+  return Boolean(
+    file &&
+    (file.type.startsWith("video/") || /\.(mp4|webm|mov|m4v)$/i.test(String(file.name || "")))
+  );
+}
+
+function cinematicClipId() {
+  return `clip_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function addCinematicClips(files) {
+  const incoming = Array.from(files || []).filter(cinematicClipAccept);
+  if (!incoming.length) {
+    toast("Choose MP4, WebM, or MOV reference clips.");
+    return;
+  }
+  const room = CINEMATIC_CLIP_LIMIT - state.cinematicClips.length;
+  if (room <= 0) {
+    toast(`The cinematic studio supports up to ${CINEMATIC_CLIP_LIMIT} clips.`);
+    return;
+  }
+  const selected = incoming.slice(0, room);
+  if (incoming.length > room) {
+    toast(`Only ${room} more clip${room === 1 ? "" : "s"} can be added.`);
+  }
+  const tooLarge = selected.find((file) => file.size > CINEMATIC_CLIP_BYTES);
+  if (tooLarge) {
+    toast(`"${tooLarge.name}" is larger than 24 MB.`);
+    return;
+  }
+  const used = state.cinematicClips.reduce((sum, clip) => sum + clip.size, 0);
+  if (used + selected.reduce((sum, file) => sum + file.size, 0) > CINEMATIC_TOTAL_BYTES) {
+    toast("Reference clips must total less than 36 MB.");
+    return;
+  }
+  for (const file of selected) {
+    state.cinematicClips.push({
+      id: cinematicClipId(),
+      file,
+      name: file.name || "Reference clip",
+      size: file.size,
+      type: file.type,
+      previewUrl: URL.createObjectURL(file),
+    });
+  }
+  renderCinematic();
+}
+
+function removeCinematicClip(index) {
+  const clip = state.cinematicClips[index];
+  if (!clip) return;
+  URL.revokeObjectURL(clip.previewUrl);
+  state.cinematicClips.splice(index, 1);
+  renderCinematic();
+}
+
+async function applyCinematicAudio(file) {
+  if (!file) return;
+  try {
+    const sample = await readAudioSample(file);
+    if (state.cinematicAudio?.previewUrl) URL.revokeObjectURL(state.cinematicAudio.previewUrl);
+    state.cinematicAudio = {
+      ...sample,
+      transcript: "",
+      previewUrl: URL.createObjectURL(file),
+    };
+    renderCinematic();
+    toast(`Added ${sample.name}`);
+  } catch (error) {
+    toast(error.message || "That audio sample could not be used.");
+  }
+}
+
+function removeCinematicAudio() {
+  if (state.cinematicAudio?.previewUrl) URL.revokeObjectURL(state.cinematicAudio.previewUrl);
+  state.cinematicAudio = null;
+  renderCinematic();
+}
+
+function cinematicOutfitAccept(file) {
+  if (!file) return false;
+  if (file.type && /^image\/(png|jpe?g|webp)$/i.test(file.type)) return true;
+  return /\.(png|jpe?g|webp)$/i.test(file.name || "");
+}
+
+function applyCinematicOutfit(file) {
+  if (!file) return;
+  if (!cinematicOutfitAccept(file)) {
+    toast("Choose a PNG, JPEG, or WebP outfit image.");
+    return;
+  }
+  if (file.size > CINEMATIC_OUTFIT_BYTES) {
+    toast(`"${file.name}" is larger than 10 MB.`);
+    return;
+  }
+  if (state.cinematicOutfit?.previewUrl) URL.revokeObjectURL(state.cinematicOutfit.previewUrl);
+  state.cinematicOutfit = {
+    file,
+    name: file.name || "Outfit reference",
+    size: file.size,
+    previewUrl: URL.createObjectURL(file),
+  };
+  renderCinematic();
+  void refreshWardrobePricing();
+  toast(`Added ${state.cinematicOutfit.name}`);
+}
+
+function removeCinematicOutfit() {
+  if (state.cinematicOutfit?.previewUrl) URL.revokeObjectURL(state.cinematicOutfit.previewUrl);
+  state.cinematicOutfit = null;
+  state.cinematicWardrobePricing = null;
+  state.cinematicWardrobePricingFor = "";
+  renderCinematic();
+}
+
+async function refreshWardrobePricing(force = false) {
+  if (!state.cinematicOutfit) return;
+  const data = cinematicData();
+  const model = data.wardrobeModel;
+  if (!model) return;
+  if (!force && state.cinematicWardrobePricingFor === model.id && state.cinematicWardrobePricing) return;
+  state.cinematicWardrobePricingFor = model.id;
+  state.cinematicWardrobePricing = null;
+  try {
+    const endpoints = await fetchImageModelPricing(store.settings().apiKey, model.id);
+    if (state.cinematicWardrobePricingFor !== model.id) return;
+    state.cinematicWardrobePricing = endpoints;
+  } catch {
+    if (state.cinematicWardrobePricingFor !== model.id) return;
+    state.cinematicWardrobePricing = null;
+  }
+  updateCinematicEstimate();
+}
+
+function cinematicData() {
+  const settings = store.settings();
+  const videoModels = state.models.filter((model) => model.kind === "video");
+  const voices = speechModels();
+  const scriptModels = state.models.filter((model) => model.kind !== "video" && model.kind !== "speech");
+
+  const videoModel =
+    videoModels.find((model) => model.id === state.cinematicVideoModel) ||
+    videoModels.find((model) => model.id === settings.defaultModel) ||
+    videoModels[0] ||
+    null;
+  const speechModel =
+    voices.find((model) => model.id === state.cinematicSpeechModel) ||
+    voices.find((model) => model.id === settings.speechModel) ||
+    voices[0] ||
+    null;
+  const scriptModel =
+    scriptModels.find((model) => model.id === state.cinematicScriptModel) ||
+    scriptModels.find((model) => model.id === settings.defaultModel) ||
+    scriptModels[0] ||
+    null;
+  const imageModels = state.imageModels;
+  const wardrobeModel =
+    imageModels.find((model) => model.id === state.cinematicWardrobeModel) ||
+    imageModels.find((model) => model.maxReferences >= 2) ||
+    imageModels.find((model) => model.references) ||
+    imageModels[0] ||
+    null;
+
+  if (videoModel) state.cinematicVideoModel = videoModel.id;
+  if (speechModel) state.cinematicSpeechModel = speechModel.id;
+  if (scriptModel) state.cinematicScriptModel = scriptModel.id;
+  if (wardrobeModel) state.cinematicWardrobeModel = wardrobeModel.id;
+
+  const durationValue = $("#cine-duration")?.value ?? settings.videoDuration;
+  const resolutionValue = $("#cine-resolution")?.value ?? settings.videoResolution;
+  const aspectValue = $("#cine-aspect")?.value ?? settings.videoAspectRatio;
+  const options = clampVideoOptions(videoModel, {
+    duration: durationValue,
+    resolution: resolutionValue,
+    aspectRatio: aspectValue,
+    generateAudio: false,
+  });
+
+  const currentVoice = $("#cine-voice")?.value;
+  const voice = currentVoice && (!speechModel?.voices?.length || speechModel.voices.includes(currentVoice))
+    ? currentVoice
+    : settings.speechVoice && (!speechModel?.voices?.length || speechModel.voices.includes(settings.speechVoice))
+      ? settings.speechVoice
+      : speechModel?.voices?.[0] || "";
+  const speed = clampSpeechSpeed($("#cine-speed")?.value ?? settings.speechSpeed);
+
+  return {
+    settings,
+    videoModel,
+    speechModel,
+    scriptModel,
+    imageModels,
+    wardrobeModel,
+    lipSync: state.cinematicLipSync,
+    delivery: state.cinematicDelivery,
+    options,
+    voice,
+    speed,
+  };
+}
+
+function cinematicOptionsFromControls(videoModel) {
+  const settings = store.settings();
+  return clampVideoOptions(videoModel, {
+    duration: $("#cine-duration")?.value ?? settings.videoDuration,
+    resolution: $("#cine-resolution")?.value ?? settings.videoResolution,
+    aspectRatio: $("#cine-aspect")?.value ?? settings.videoAspectRatio,
+    generateAudio: false,
+  });
+}
+
+function cinematicEstimatedChars(duration) {
+  return Math.max(120, Math.round((Number(duration) || 50) * 13));
+}
+
+function cinematicWardrobeCost() {
+  if (!state.cinematicOutfit) return 0;
+  return estimateImageCost(state.cinematicWardrobePricing, { references: 2 });
+}
+
+function cinematicCostParts(data, options) {
+  const scriptChars = state.cinematicResult?.script?.length || cinematicEstimatedChars(options.duration);
+  const videoCost = data.videoModel ? estimatedVideoCost(data.videoModel, options, state.cinematicPrompt) : null;
+  const speechCost = data.speechModel ? estimateSpeechCost(data.speechModel, "x".repeat(scriptChars)) : null;
+  const wardrobeCost = cinematicWardrobeCost();
+  const total = videoCost === null || speechCost === null || wardrobeCost === null
+    ? null
+    : videoCost + speechCost + wardrobeCost;
+  return { scriptChars, videoCost, speechCost, wardrobeCost, total };
+}
+
+function cinematicMoney(value) {
+  return value === null ? "Unavailable" : formatVideoCost(value);
+}
+
+function cinematicSelect(id, rows, selected, label) {
+  const value = String(selected);
+  return `<select id="${id}">${rows
+    .map((row) => {
+      const rowValue = String(row.value);
+      const isSelected = rowValue === value;
+      return `<option value="${escapeHtml(rowValue)}"${isSelected ? " selected" : ""}${row.disabled ? " disabled" : ""}>${escapeHtml(label(row.value))}</option>`;
+    })
+    .join("")}</select>`;
+}
+
+function cinematicCostHtml(data, options) {
+  const { scriptChars, videoCost, speechCost, wardrobeCost, total } = cinematicCostParts(data, options);
+  return `<div class="cine-cost">
+    <div class="cine-cost-row">
+      <span>B-roll ${escapeHtml(durationLabel(options.duration))} · ${escapeHtml(options.resolution)}</span>
+      <strong id="cine-video-cost">${escapeHtml(cinematicMoney(videoCost))}</strong>
+    </div>
+    <div class="cine-cost-row">
+      <span>Voiceover · <span id="cine-tts-chars">${scriptChars}</span> chars</span>
+      <strong id="cine-tts-cost">${escapeHtml(cinematicMoney(speechCost))}</strong>
+    </div>
+    ${state.cinematicOutfit ? `<div class="cine-cost-row">
+      <span>Wardrobe still${data.wardrobeModel ? ` · ${escapeHtml(data.wardrobeModel.name || data.wardrobeModel.id)}` : ""}</span>
+      <strong id="cine-wardrobe-cost">${escapeHtml(cinematicMoney(wardrobeCost))}</strong>
+    </div>` : ""}
+    <div class="cine-cost-row cine-cost-total">
+      <span>Estimated total</span>
+      <strong id="cine-total-cost">${escapeHtml(cinematicMoney(total))}</strong>
+    </div>
+  </div>`;
+}
+
+function cinematicAnalysisLine(analysis) {
+  if (!analysis) return "";
+  if (typeof analysis === "string") return analysis.trim();
+  const clips = Number(analysis.clip_count) || 0;
+  const clipBytes = formatBytes(analysis.total_clip_bytes);
+  const audioBytes = formatBytes(analysis.audio_sample?.bytes);
+  const parts = [];
+  if (clips) parts.push(`${clips} reference clip${clips === 1 ? "" : "s"}${clipBytes ? ` (${clipBytes})` : ""}`);
+  if (analysis.reference_frame) parts.push("first frame read");
+  if (analysis.wardrobe) parts.push(`wardrobe swapped${analysis.wardrobe.model ? ` with ${analysis.wardrobe.model}` : ""}`);
+  if (analysis.lip_sync) parts.push("audio-synced motion");
+  if (audioBytes) parts.push(`voice sample ${audioBytes}`);
+  if (analysis.duration) parts.push(`${durationLabel(analysis.duration)} at ${analysis.resolution || "video"}`);
+  return parts.length ? `${parts.join(" · ")}.` : "Reference media ready.";
+}
+
+function cinematicPipelineHtml() {
+  const result = state.cinematicResult;
+  const analyzing = state.cinematicBusy && state.cinematicStage === "analyzing";
+  const brollActive = state.cinematicBusy && Boolean(result) && !result.videoUrl && !result.videoError;
+  const brollFailed = Boolean(result?.videoError);
+  return `<div class="cine-pipeline" id="cine-pipeline">
+    <div class="cine-step${result ? " done" : analyzing ? " active" : ""}">
+      <span class="cine-step-icon">${result ? '<svg class="icon"><use href="#i-check"/></svg>' : '<svg class="icon"><use href="#i-film"/></svg>'}</span>
+      <span><strong>Reference review</strong><small>${result ? `${state.cinematicClips.length || 1} clip${state.cinematicClips.length === 1 ? "" : "s"} ready${result.analysis?.reference_frame ? " + frame" : ""}` : analyzing ? "Reading the first frame and brief" : "Waiting for references"}</small></span>
+    </div>
+    <div class="cine-step${result?.audioUrl ? " done" : analyzing ? " active" : ""}">
+      <span class="cine-step-icon">${result?.audioUrl ? '<svg class="icon"><use href="#i-check"/></svg>' : '<svg class="icon"><use href="#i-wave"/></svg>'}</span>
+      <span><strong>Voiceover</strong><small>${result?.audioUrl ? "Cloned voice ready" : analyzing ? "Writing and voicing narration" : "Your audio sample sets the tone"}</small></span>
+    </div>
+    ${state.cinematicOutfit || result?.wardrobe ? `<div class="cine-step${result?.wardrobe ? " done" : analyzing ? " active" : ""}">
+      <span class="cine-step-icon">${result?.wardrobe ? '<svg class="icon"><use href="#i-check"/></svg>' : '<svg class="icon"><use href="#i-spark"/></svg>'}</span>
+      <span><strong>Wardrobe</strong><small>${result?.wardrobe ? "Outfit applied to the reference frame" : analyzing ? "Dressing the first frame" : "Waiting for the voiceover"}</small></span>
+    </div>` : ""}
+    <div class="cine-step${result?.videoUrl ? " done" : brollFailed ? " failed" : brollActive ? " active" : ""}">
+      <span class="cine-step-icon">${result?.videoUrl ? '<svg class="icon"><use href="#i-check"/></svg>' : '<svg class="icon"><use href="#i-play"/></svg>'}</span>
+      <span><strong>AI B-roll</strong><small>${result?.videoUrl ? "New footage rendered" : brollFailed ? "B-roll unavailable" : brollActive ? VIDEO_STATUS_LABELS[result?.videoJob?.status] || "Starting render" : "Ready after the voiceover"}</small></span>
+    </div>
+  </div>`;
+}
+
+function cinematicBrollHtml() {
+  const result = state.cinematicResult;
+  if (!result) {
+    return `<div class="cine-broll-empty"><svg class="icon"><use href="#i-film"/></svg><span>New AI B-roll will appear here</span></div>`;
+  }
+  if (result.videoUrl) {
+    return `<div class="cine-broll-player">
+      <video src="${escapeHtml(result.videoUrl)}" controls playsinline preload="metadata"></video>
+      <a class="chip-btn" href="${escapeHtml(result.videoUrl)}" download="cinematic-broll.mp4">
+        <svg class="icon"><use href="#i-download"/></svg><span>Download B-roll</span>
+      </a>
+    </div>`;
+  }
+  if (result.videoError) {
+    return `<div class="cine-broll-state failed">
+      <svg class="icon"><use href="#i-film"/></svg>
+      <strong>B-roll could not be generated</strong>
+      <p>${escapeHtml(result.videoError)}</p>
+      <button type="button" class="btn" data-cine-action="retry-broll"${state.cinematicBusy ? " disabled" : ""}>
+        <svg class="icon"><use href="#i-refresh"/></svg><span>Retry B-roll</span>
+      </button>
+    </div>`;
+  }
+  return `<div class="cine-broll-state">
+    <span class="spinner"></span>
+    <strong>Generating B-roll</strong>
+    <p>${escapeHtml(VIDEO_STATUS_LABELS[result.videoJob?.status] || "Starting render")} · new footage is created from your brief and narration.</p>
+  </div>`;
+}
+
+function cinematicResultHtml() {
+  const result = state.cinematicResult;
+  if (!result) {
+    if (state.cinematicBusy) {
+      return `<div class="cine-card cine-result-card">
+        ${cinematicPipelineHtml()}
+        <div class="cine-analyzing">
+          <span class="spinner"></span>
+          <strong>Directing your edit</strong>
+          <p>The script model is writing the voiceover, then the voice and B-roll render in sequence.</p>
+        </div>
+      </div>`;
+    }
+    return `<div class="cine-card cine-result-card cine-result-empty">
+      <span class="cine-empty-icon"><svg class="icon"><use href="#i-spark"/></svg></span>
+      <h3>Your cinematic edit appears here</h3>
+      <p>Add reference clips and a voice sample, describe the property, then generate a scripted voiceover with matching AI B-roll.</p>
+    </div>`;
+  }
+  const chars = result.script?.length || 0;
+  const readSeconds = Math.max(1, Math.round(chars / 13));
+  return `<div class="cine-result">
+    ${cinematicPipelineHtml()}
+    ${result.analysis ? `<p class="cine-analysis"><svg class="icon"><use href="#i-film"/></svg><span>${escapeHtml(cinematicAnalysisLine(result.analysis))}</span></p>` : ""}
+    ${result.wardrobeError ? `<div class="cine-error"><svg class="icon"><use href="#i-x"/></svg><span>Wardrobe swap skipped: ${escapeHtml(result.wardrobeError)}</span></div>` : ""}
+    <div class="cine-result-grid">
+      <section class="cine-card cine-script-card">
+        <div class="cine-card-head">
+          <div><h3>Voiceover script</h3><small id="cine-script-meta">${chars} chars · ~${readSeconds}s read</small></div>
+          <button type="button" class="icon-btn" data-cine-action="copy-script" aria-label="Copy voiceover script" title="Copy script">
+            <svg class="icon"><use href="#i-copy"/></svg>
+          </button>
+        </div>
+        <div class="cine-script" id="cine-script-text">${escapeHtml(result.script)}</div>
+      </section>
+      <div class="cine-result-side">
+        <section class="cine-card cine-voice-card">
+          <div class="cine-card-head"><div><h3>Voiceover</h3><small>${escapeHtml(result.speechModel || "Speech model")}</small></div></div>
+          <audio class="cine-audio-player" controls preload="metadata" src="${escapeHtml(result.audioUrl)}"></audio>
+          <div class="cine-mini-actions">
+            <a class="chip-btn" href="${escapeHtml(result.audioUrl)}" download="cinematic-voiceover.mp3">
+              <svg class="icon"><use href="#i-download"/></svg><span>Download audio</span>
+            </a>
+          </div>
+        </section>
+        <section class="cine-card cine-broll-card">
+          <div class="cine-card-head"><div><h3>AI B-roll</h3><small>${escapeHtml(result.videoModel || "Video model")}${result.lipSync ? " · audio-synced" : ""}</small></div></div>
+          ${result.wardrobe?.data_url ? `<figure class="cine-wardrobe-still"><img src="${escapeHtml(result.wardrobe.data_url)}" alt="Wardrobe still"><figcaption>Wardrobe still used as the first frame</figcaption></figure>` : ""}
+          <div id="cine-broll-slot">${cinematicBrollHtml()}</div>
+        </section>
+      </div>
+    </div>
+  </div>`;
+}
+
+function cinematicUploadsHtml() {
+  const clips = state.cinematicClips;
+  return `<section class="cine-card">
+    <div class="cine-card-head"><div><h3>Reference clips</h3><small>${clips.length}/${CINEMATIC_CLIP_LIMIT} · pacing, framing, and room flow</small></div></div>
+    <button type="button" class="cine-drop${clips.length ? " compact" : ""}" data-cine-drop="clips" data-cine-action="pick-clips">
+      <span class="cine-drop-icon"><svg class="icon"><use href="#i-film"/></svg></span>
+      <span><strong>${clips.length ? "Add more clips" : "Drop reference clips"}</strong><small>MP4, WebM, or MOV · up to 6 · 36 MB total</small></span>
+    </button>
+    ${clips.length ? `<div class="cine-clip-grid">${clips.map((clip, index) => `
+      <div class="cine-clip">
+        <video src="${escapeHtml(clip.previewUrl)}" muted playsinline preload="metadata"></video>
+        <div class="cine-clip-info"><strong>${escapeHtml(clip.name)}</strong><span>${escapeHtml(formatBytes(clip.size))}</span></div>
+        <button type="button" class="icon-btn cine-clip-remove" data-cine-action="remove-clip" data-index="${index}" aria-label="Remove ${escapeHtml(clip.name)}">
+          <svg class="icon"><use href="#i-x"/></svg>
+        </button>
+      </div>`).join("")}</div>` : ""}
+    <div class="cine-audio${state.cinematicAudio ? " has-audio" : ""}">
+      <div class="cine-audio-head">
+        <div><strong>Voice sample</strong><small>${state.cinematicAudio ? escapeHtml(state.cinematicAudio.name) : "WAV, MP3, M4A, or OGG · 12 MB max"}</small></div>
+        ${state.cinematicAudio ? `<button type="button" class="icon-btn" data-cine-action="remove-audio" aria-label="Remove voice sample"><svg class="icon"><use href="#i-trash"/></svg></button>` : ""}
+      </div>
+      ${state.cinematicAudio
+        ? `<audio controls preload="metadata" src="${escapeHtml(state.cinematicAudio.previewUrl)}"></audio>
+           <textarea id="cine-transcript" rows="2" placeholder="Optional: paste a transcript of the sample for a more accurate clone">${escapeHtml(state.cinematicAudio.transcript || "")}</textarea>`
+        : `<button type="button" class="btn" data-cine-action="pick-audio"><svg class="icon"><use href="#i-mic"/></svg><span>Add voice sample</span></button>`}
+    </div>
+    <div class="cine-audio cine-outfit${state.cinematicOutfit ? " has-audio" : ""}">
+      <div class="cine-audio-head">
+        <div><strong>Wardrobe reference</strong><small>${state.cinematicOutfit ? escapeHtml(state.cinematicOutfit.name) : "Optional outfit image · PNG, JPEG, or WebP · 10 MB max"}</small></div>
+        ${state.cinematicOutfit ? `<button type="button" class="icon-btn" data-cine-action="remove-outfit" aria-label="Remove wardrobe reference"><svg class="icon"><use href="#i-trash"/></svg></button>` : ""}
+      </div>
+      ${state.cinematicOutfit
+        ? `<div class="cine-outfit-preview"><img src="${escapeHtml(state.cinematicOutfit.previewUrl)}" alt="Wardrobe reference"><span>${escapeHtml(formatBytes(state.cinematicOutfit.size))}</span></div>
+           <textarea id="cine-wardrobe-prompt" rows="2" maxlength="4000" placeholder="Optional styling notes, e.g. tailored navy suit, soft daylight">${escapeHtml(state.cinematicWardrobePrompt)}</textarea>
+           <p class="cine-hint">The image model dresses the presenter from your first clip's frame, then that still anchors the B-roll.</p>`
+        : `<button type="button" class="btn" data-cine-action="pick-outfit"><svg class="icon"><use href="#i-spark"/></svg><span>Add outfit image</span></button>`}
+    </div>
+  </section>`;
+}
+
+function cinematicTimelineHtml() {
+  const result = state.cinematicResult;
+  const clips = state.cinematicClips;
+  const brollClass = result?.videoUrl ? "ready" : result?.videoError ? "failed" : result ? "rendering" : "idle";
+  const total = Number($("#cine-duration")?.value) || 50;
+  return `<section class="cine-card cine-timeline-card">
+    <div class="cine-card-head">
+      <div><h3>Edit timeline</h3><small>Reference cut · ${escapeHtml(durationLabel(total))} voiceover · AI B-roll</small></div>
+      <span class="cine-timeline-badge"><svg class="icon"><use href="#i-wave"/></svg> Cinematic</span>
+    </div>
+    <div class="cine-timeline">
+      <div class="cine-track">
+        <span class="cine-track-label">REF</span>
+        <div class="cine-track-lane">
+          ${clips.length
+            ? clips.map((clip, index) => `<div class="cine-block source" style="--block:${Math.max(18, Math.round(100 / clips.length))}%">
+                <video src="${escapeHtml(clip.previewUrl)}" muted playsinline preload="metadata"></video>
+                <span class="cine-block-index">${index + 1}</span>
+                <span class="cine-block-name">${escapeHtml(clip.name)}</span>
+              </div>`).join("")
+            : `<div class="cine-block empty">Your clips line up here</div>`}
+        </div>
+      </div>
+      <div class="cine-track">
+        <span class="cine-track-label">VO</span>
+        <div class="cine-track-lane">
+          <div class="cine-block voice${result?.audioUrl ? " ready" : ""}">
+            <span class="cine-waveform">${Array.from({ length: 42 }, (_, index) => `<i style="--h:${18 + ((index * 13) % 62)}%"></i>`).join("")}</span>
+            <span class="cine-block-name">${result?.audioUrl ? "Voiceover ready" : "AI narration"}</span>
+          </div>
+        </div>
+      </div>
+      <div class="cine-track">
+        <span class="cine-track-label">B-ROLL</span>
+        <div class="cine-track-lane">
+          <div class="cine-block broll ${brollClass}">
+            ${result?.videoUrl
+              ? `<video src="${escapeHtml(result.videoUrl)}" muted playsinline preload="metadata"></video>`
+              : `<span class="cine-block-placeholder">${result?.videoError ? "Render failed" : result ? "Rendering new footage" : "AI footage follows the narration"}</span>`}
+            <span class="cine-block-name">${result?.videoUrl ? "New B-roll" : "AI generated"}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>`;
+}
+
+function cinematicBriefHtml(data) {
+  return `<section class="cine-card">
+    <div class="cine-card-head"><div><h3>Creative direction</h3><small>The script model turns this into a timed voiceover.</small></div></div>
+    <textarea id="cine-prompt" rows="7" maxlength="32000" placeholder="Describe the property, the feeling, the walkthrough, the neighborhood, and the shots you want...">${escapeHtml(state.cinematicPrompt)}</textarea>
+    <div class="cine-prompt-row">
+      <div class="cine-examples">
+        ${CINEMATIC_EXAMPLES.map((example, index) => `<button type="button" class="chip-btn" data-cine-action="example" data-example="${index}">${escapeHtml(example.label)}</button>`).join("")}
+      </div>
+      <span id="cine-prompt-count">${state.cinematicPrompt.length.toLocaleString()} / 32,000</span>
+    </div>
+  </section>`;
+}
+
+function cinematicSettingsHtml(data) {
+  const { options, videoModel, speechModel, scriptModel, imageModels, wardrobeModel, voice, speed } = data;
+  const durations = videoSelectRows(STANDARD_VIDEO_DURATIONS, videoModel?.durations || []);
+  const resolutions = videoSelectRows(STANDARD_VIDEO_RESOLUTIONS, videoModel?.resolutions || []);
+  const aspects = videoSelectRows(STANDARD_VIDEO_ASPECTS, videoModel?.aspectRatios || []);
+  const chatModels = state.models.filter((model) => model.kind !== "video" && model.kind !== "speech");
+  const videoModels = state.models.filter((model) => model.kind === "video");
+  const voices = speechModels();
+  const modelRows = (models, selected) => models
+    .map((model) => `<option value="${escapeHtml(model.id)}"${model.id === selected ? " selected" : ""}>${escapeHtml(model.name || model.id)}</option>`)
+    .join("");
+  return `<section class="cine-card">
+    <div class="cine-card-head"><div><h3>Production settings</h3><small>Models, voice, duration, and output format.</small></div></div>
+    <div class="cine-settings">
+      <label class="cine-field cine-field-wide"><span>Script model</span>
+        <select id="cine-script-model"${chatModels.length ? "" : " disabled"}>${modelRows(chatModels, scriptModel?.id || "")}</select>
+      </label>
+      <label class="cine-field"><span>Video model</span>
+        <select id="cine-video-model"${videoModels.length ? "" : " disabled"}>${modelRows(videoModels, videoModel?.id || "")}</select>
+      </label>
+      <label class="cine-field"><span>Voice model</span>
+        <select id="cine-speech-model"${voices.length ? "" : " disabled"}>${modelRows(voices, speechModel?.id || "")}</select>
+      </label>
+      <label class="cine-field"><span>Voice</span>
+        <input id="cine-voice" list="speech-voices" value="${escapeHtml(voice)}" placeholder="Choose a voice">
+      </label>
+      <label class="cine-field"><span>Speed</span>
+        <input id="cine-speed" type="number" min="0.5" max="2" step="0.05" value="${escapeHtml(String(speed))}">
+      </label>
+      ${imageModels.length ? `<label class="cine-field"><span>Wardrobe model</span>
+        <select id="cine-wardrobe-model"${wardrobeModel ? "" : " disabled"}>${modelRows(imageModels, wardrobeModel?.id || "")}</select>
+      </label>` : ""}
+      <label class="cine-field"><span>Duration</span>
+        ${cinematicSelect("cine-duration", durations, options.duration, durationLabel)}
+      </label>
+      <label class="cine-field"><span>Resolution</span>
+        ${cinematicSelect("cine-resolution", resolutions, options.resolution, (value) => value)}
+      </label>
+      <label class="cine-field"><span>Aspect ratio</span>
+        ${cinematicSelect("cine-aspect", aspects, options.aspectRatio, (value) => value)}
+      </label>
+      <label class="cine-field cine-field-wide"><span>Voice delivery</span>
+        <textarea id="cine-delivery" rows="2" maxlength="2000" placeholder="Optional direction, e.g. warm, conversational, measured pace, subtle smile">${escapeHtml(state.cinematicDelivery)}</textarea>
+      </label>
+      ${state.cinematicOutfit && wardrobeModel && wardrobeModel.maxReferences < 2 ? `<p class="cine-hint cine-field-wide">This model accepts fewer than two references. Choose an image-editing model for the wardrobe swap.</p>` : ""}
+      <label class="cine-toggle cine-field-wide">
+        <input id="cine-lip-sync" type="checkbox"${state.cinematicLipSync ? " checked" : ""}>
+        <span><strong>Audio-synced motion</strong><small>Send the voiceover as a reference so supported video models align mouth movement. Model-dependent.</small></span>
+      </label>
+    </div>
+    ${cinematicCostHtml(data, options)}
+    <div class="cine-generate-row">
+      <div class="cine-generate-copy"><strong>Voiceover + B-roll</strong><small>Script, cloned voice, and fresh AI footage in one run.</small></div>
+      <div class="cine-generate-actions">
+        ${state.cinematicBusy ? `<button type="button" class="btn" data-cine-action="stop"><svg class="icon"><use href="#i-x"/></svg><span>Stop</span></button>` : ""}
+        <button type="button" class="btn primary cine-generate" data-cine-action="generate"${state.cinematicBusy ? " disabled" : ""}>
+          <svg class="icon"><use href="#i-spark"/></svg><span>${state.cinematicBusy ? "Directing..." : "Generate cinematic edit"}</span>
+        </button>
+      </div>
+    </div>
+  </section>`;
+}
+
+function releaseCinematicResult() {
+  const result = state.cinematicResult;
+  if (!result) return;
+  if (result.audioUrl) URL.revokeObjectURL(result.audioUrl);
+  if (result.videoUrl) URL.revokeObjectURL(result.videoUrl);
+}
+
+function renderCinematic() {
+  if (!state.cinematic) return;
+  const data = cinematicData();
+  const stageLabels = {
+    analyzing: "Writing the script",
+    voiceover: "Cloning the voice",
+    broll: "Rendering B-roll",
+  };
+  const status = state.cinematicBusy ? stageLabels[state.cinematicStage] || "Directing" : "Ready to edit";
+  dom.thread.innerHTML = `<div class="cinematic">
+    <header class="cine-head">
+      <div class="cine-title-wrap">
+        <span class="cine-eyebrow"><svg class="icon"><use href="#i-film"/></svg> Cinematic real estate studio</span>
+        <h1>Turn listing clips into a <em>finished property film.</em></h1>
+        <p>Upload a few walkthrough shots and a voice sample. The studio writes the narration, clones the voice, and generates matching B-roll.</p>
+      </div>
+      <div class="cine-head-side">
+        <span class="cine-live${state.cinematicBusy ? " busy" : ""}" id="cine-busy-pill"><span class="cine-live-dot"></span>${escapeHtml(status)}</span>
+        ${state.cinematicResult ? `<button type="button" class="chip-btn" data-cine-action="reset"><svg class="icon"><use href="#i-refresh"/></svg><span>New edit</span></button>` : ""}
+      </div>
+    </header>
+    ${state.cinematicError ? `<div class="cine-error"><svg class="icon"><use href="#i-x"/></svg><span>${escapeHtml(state.cinematicError)}</span></div>` : ""}
+    <div class="cine-grid">
+      <div class="cine-stack">
+        ${cinematicUploadsHtml()}
+        ${cinematicTimelineHtml()}
+      </div>
+      <div class="cine-stack">
+        ${cinematicBriefHtml(data)}
+        ${cinematicSettingsHtml(data)}
+        ${cinematicResultHtml()}
+      </div>
+    </div>
+  </div>`;
+  updateCinematicEstimate();
+}
+
+function updateCinematicEstimate() {
+  if (!state.cinematic) return;
+  const data = cinematicData();
+  const options = cinematicOptionsFromControls(data.videoModel);
+  const { scriptChars, videoCost, speechCost, wardrobeCost, total } = cinematicCostParts(data, options);
+  const video = $("#cine-video-cost");
+  const speech = $("#cine-tts-cost");
+  const wardrobe = $("#cine-wardrobe-cost");
+  const totalElement = $("#cine-total-cost");
+  const chars = $("#cine-tts-chars");
+  if (video) video.textContent = cinematicMoney(videoCost);
+  if (speech) speech.textContent = cinematicMoney(speechCost);
+  if (wardrobe) wardrobe.textContent = cinematicMoney(wardrobeCost);
+  if (totalElement) totalElement.textContent = cinematicMoney(total);
+  if (chars) chars.textContent = String(scriptChars);
+}
+
+function updateCinematicBrollView() {
+  if (!state.cinematic) return;
+  const slot = $("#cine-broll-slot");
+  if (slot) slot.innerHTML = cinematicBrollHtml();
+  const pipeline = $("#cine-pipeline");
+  if (pipeline) pipeline.outerHTML = cinematicPipelineHtml();
+}
+
+function updateCinematicBusyUi() {
+  if (!state.cinematic) return;
+  const pill = $("#cine-busy-pill");
+  const button = $('[data-cine-action="generate"]');
+  const labels = {
+    analyzing: "Writing the script",
+    voiceover: "Cloning the voice",
+    broll: "Rendering B-roll",
+  };
+  if (pill) {
+    pill.classList.toggle("busy", state.cinematicBusy);
+    pill.innerHTML = `<span class="cine-live-dot"></span>${escapeHtml(state.cinematicBusy ? labels[state.cinematicStage] || "Directing" : "Ready to edit")}`;
+  }
+  if (button) {
+    button.disabled = state.cinematicBusy;
+    const label = button.querySelector("span");
+    if (label) label.textContent = state.cinematicBusy ? "Directing..." : state.cinematicResult ? "Regenerate cinematic edit" : "Generate cinematic edit";
+  }
+}
+
+function canRunCinematic() {
+  return Boolean(
+    state.models.length &&
+    state.cinematicClips.length &&
+    state.cinematicAudio &&
+    store.settings().apiKey
+  );
+}
+
+async function trackCinematicBroll(result, onUpdate) {
+  const job = result.videoJob;
+  if (!job?.id) {
+    throw new Error(result.videoError || "The video model did not start a B-roll job.");
+  }
+  const apiKey = store.settings().apiKey;
+  const base = { ...job, model: job.model || result.videoModel };
+  const final = await waitForVideoGeneration({
+    apiKey,
+    job: base,
+    signal: state.cinematicController?.signal,
+    onUpdate: (next) => {
+      result.videoJob = mergeVideoJob(result.videoJob, next);
+      result.stage = "broll";
+      onUpdate?.();
+    },
+  });
+  result.videoJob = mergeVideoJob(result.videoJob, final);
+  if (final.status !== "completed") {
+    throw new Error(jobError(final) || "The B-roll job stopped before completion.");
+  }
+  const url = videoJobUrls(final)[0] || videoJobUrls(base)[0];
+  if (!url) throw new Error("The B-roll job completed without a video URL.");
+  const blob = await fetchVideoContent({
+    apiKey,
+    url,
+    signal: state.cinematicController?.signal,
+  });
+  result.videoUrl = URL.createObjectURL(blob);
+  result.videoError = "";
+  result.stage = "complete";
+  onUpdate?.();
+}
+
+async function runCinematicEdit() {
+  if (state.cinematicBusy) return;
+  const data = cinematicData();
+  if (!store.settings().apiKey) {
+    toast("Add your OpenRouter API key in Settings first.");
+    openSettings();
+    return;
+  }
+  if (!data.scriptModel || !data.speechModel || !data.videoModel) {
+    toast("The cinematic studio needs a script, speech, and video model.");
+    return;
+  }
+  if (!state.cinematicClips.length) {
+    toast("Add at least one reference clip.");
+    return;
+  }
+  if (!state.cinematicAudio) {
+    toast("Add a voice sample so the narration matches the listing.");
+    return;
+  }
+  if (!state.cinematicPrompt.trim()) {
+    toast("Describe the property and the film you want.");
+    $("#cine-prompt")?.focus();
+    return;
+  }
+  if (state.cinematicOutfit && !data.wardrobeModel) {
+    toast("Choose an image model to apply the wardrobe reference.");
+    return;
+  }
+
+  state.cinematicBusy = true;
+  state.cinematicError = "";
+  state.cinematicStage = "analyzing";
+  releaseCinematicResult();
+  state.cinematicResult = null;
+  state.cinematicController = new AbortController();
+  updateCinematicBusyUi();
+
+  const options = cinematicOptionsFromControls(data.videoModel);
+  const clips = state.cinematicClips.map((clip) => ({
+    name: clip.name,
+    type: clip.type,
+    data: null,
+    file: clip.file,
+  }));
+  const audio = state.cinematicAudio;
+  const transcript = ($("#cine-transcript")?.value || audio.transcript || "").trim();
+  const voice = ($("#cine-voice")?.value || data.voice || "").trim();
+  const speed = clampSpeechSpeed($("#cine-speed")?.value ?? data.speed);
+  const prompt = state.cinematicPrompt;
+  if (audio) audio.transcript = transcript;
+
+  renderCinematic();
+  state.cinematicStage = "analyzing";
+  updateCinematicBusyUi();
+
+  try {
+    const clipData = await Promise.all(clips.map(async (clip) => {
+      const raw = await readFileDataUrl(clip.file);
+      return {
+        name: clip.name,
+        type: clip.type,
+        data: raw,
+      };
+    }));
+    const referenceFrame = await cinematicReferenceFrame(clips[0].file).catch(() => "");
+    const outfitImage = state.cinematicOutfit
+      ? await readFileDataUrl(state.cinematicOutfit.file)
+      : "";
+
+    const payload = await createCinematicEdit({
+      apiKey: store.settings().apiKey,
+      referenceFrame,
+      scriptModel: data.scriptModel.id,
+      speechModel: data.speechModel.id,
+      videoModel: data.videoModel.id,
+      wardrobeModel: state.cinematicOutfit ? data.wardrobeModel?.id || "" : "",
+      wardrobePrompt: state.cinematicWardrobePrompt,
+      outfitImage,
+      lipSync: state.cinematicLipSync,
+      prompt,
+      duration: options.duration,
+      resolution: options.resolution,
+      aspectRatio: options.aspectRatio,
+      clips: clipData,
+      audioSample: audio.data,
+      transcript,
+      voice,
+      instructions: state.cinematicDelivery,
+      speed,
+      signal: state.cinematicController.signal,
+    });
+
+    const script = String(payload?.script || "").trim();
+    if (!script) throw new Error("The script model returned no narration.");
+    const audioData = payload?.audio?.data || payload?.audio;
+    if (!audioData || typeof audioData !== "string") throw new Error("The voiceover did not return audio.");
+
+    const audioType = payload?.audio?.content_type || payload?.audio?.mime_type || "audio/mpeg";
+    const audioUrl = URL.createObjectURL(base64ToBlob(audioData, audioType));
+    state.cinematicResult = {
+      script,
+      analysis: payload?.analysis || null,
+      audioUrl,
+      audioMime: audioType,
+      audioData,
+      referenceFrame,
+      wardrobe: payload?.wardrobe || null,
+      wardrobeError: String(payload?.wardrobe_error || "").trim(),
+      lipSync: Boolean(payload?.lip_sync),
+      scriptModel: payload?.script_model || data.scriptModel.id,
+      speechModel: payload?.speech_model || data.speechModel.id,
+      videoModel: payload?.video_model || data.videoModel.id,
+      videoRequest: payload?.video_request || null,
+      videoJob: payload?.video_job || null,
+      videoUrl: "",
+      videoError: String(payload?.video_error || "").trim(),
+      stage: payload?.video_job ? "broll" : "complete",
+    };
+    state.cinematicStage = state.cinematicResult.videoJob ? "broll" : "complete";
+    renderCinematic();
+    updateCinematicBusyUi();
+
+    if (state.cinematicResult.videoJob && !state.cinematicResult.videoError) {
+      try {
+        await trackCinematicBroll(state.cinematicResult, updateCinematicBrollView);
+        state.cinematicStage = "complete";
+      } catch (error) {
+        if (error?.name === "AbortError") throw error;
+        state.cinematicResult.videoError = friendlyError(error);
+        state.cinematicStage = "complete";
+        updateCinematicBrollView();
+      }
+    }
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      state.cinematicError = "Generation stopped.";
+    } else {
+      state.cinematicError = friendlyError(error);
+    }
+  } finally {
+    state.cinematicBusy = false;
+    state.cinematicController = null;
+    state.cinematicStage = "";
+    renderCinematic();
+  }
+}
+
+function stopCinematic() {
+  state.cinematicController?.abort();
+  state.cinematicController = null;
+  state.cinematicBusy = false;
+  state.cinematicStage = "";
+  state.cinematicError = "Generation stopped.";
+  renderCinematic();
+}
+
+function resetCinematic() {
+  releaseCinematicResult();
+  state.cinematicResult = null;
+  state.cinematicError = "";
+  state.cinematicStage = "";
+  renderCinematic();
+}
+
+function readFileDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === "string") resolve(reader.result);
+      else reject(new Error("That file could not be read."));
+    };
+    reader.onerror = () => reject(new Error("That file could not be read."));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function cinematicReferenceFrame(file) {
+  const url = URL.createObjectURL(file);
+  const video = document.createElement("video");
+  video.muted = true;
+  video.playsInline = true;
+  video.preload = "auto";
+  video.src = url;
+  try {
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("Reading the reference frame timed out.")), 8000);
+      const finish = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      video.onloadeddata = () => {
+        const target = Math.min(0.5, (Number(video.duration) || 1) / 2);
+        if (target > 0) video.currentTime = target;
+        else finish();
+      };
+      video.onseeked = finish;
+      video.onerror = () => {
+        clearTimeout(timer);
+        reject(new Error("That reference clip could not be decoded."));
+      };
+    });
+    const width = video.videoWidth;
+    const height = video.videoHeight;
+    if (!width || !height) throw new Error("That reference clip has no video frame.");
+    const scale = Math.min(1, 720 / width);
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(width * scale));
+    canvas.height = Math.max(1, Math.round(height * scale));
+    canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL("image/jpeg", 0.72);
+  } finally {
+    URL.revokeObjectURL(url);
+    video.removeAttribute("src");
+    video.load();
+  }
+}
+
+async function handleCinematicAction(button) {
+  const action = button.dataset.cineAction;
+  if (action === "pick-clips") {
+    if (dom.cinematicClipsInput) {
+      dom.cinematicClipsInput.value = "";
+      dom.cinematicClipsInput.click();
+    }
+    return;
+  }
+  if (action === "pick-audio") {
+    if (dom.cinematicAudioInput) {
+      dom.cinematicAudioInput.value = "";
+      dom.cinematicAudioInput.click();
+    }
+    return;
+  }
+  if (action === "remove-clip") {
+    removeCinematicClip(Number(button.dataset.index));
+    return;
+  }
+  if (action === "remove-audio") {
+    removeCinematicAudio();
+    return;
+  }
+  if (action === "pick-outfit") {
+    if (dom.cinematicOutfitInput) {
+      dom.cinematicOutfitInput.value = "";
+      dom.cinematicOutfitInput.click();
+    }
+    return;
+  }
+  if (action === "remove-outfit") {
+    removeCinematicOutfit();
+    return;
+  }
+  if (action === "example") {
+    const example = CINEMATIC_EXAMPLES[Number(button.dataset.example)];
+    const prompt = $("#cine-prompt");
+    if (!example || !prompt) return;
+    state.cinematicPrompt = example.prompt;
+    prompt.value = example.prompt;
+    $("#cine-prompt-count").textContent = `${example.prompt.length.toLocaleString()} / 32,000`;
+    updateCinematicEstimate();
+    return;
+  }
+  if (action === "generate") {
+    void runCinematicEdit();
+    return;
+  }
+  if (action === "stop") {
+    stopCinematic();
+    return;
+  }
+  if (action === "retry-broll") {
+    const request = state.cinematicResult?.videoRequest;
+    if (!request) {
+      toast("Regenerate the edit to retry B-roll.");
+      return;
+    }
+    if (!state.cinematicResult.videoUrl && state.cinematicResult.videoJob?.id) {
+      state.cinematicResult.videoJob = null;
+    }
+    state.cinematicBusy = true;
+    state.cinematicController = new AbortController();
+    state.cinematicStage = "broll";
+    state.cinematicError = "";
+    updateCinematicBusyUi();
+    updateCinematicBrollView();
+    void (async () => {
+      try {
+        const refs = [];
+        const swapped = state.cinematicResult.wardrobe?.data_url;
+        if (swapped) {
+          const image = videoImageReference(swapped);
+          if (image) refs.push(image);
+        } else if (state.cinematicResult.lipSync && state.cinematicResult.referenceFrame) {
+          const image = videoImageReference(state.cinematicResult.referenceFrame);
+          if (image) refs.push(image);
+        }
+        if (state.cinematicResult.lipSync && state.cinematicResult.audioData) {
+          const audio = videoAudioReference(`data:${state.cinematicResult.audioMime || "audio/mpeg"};base64,${state.cinematicResult.audioData}`);
+          if (audio) refs.push(audio);
+        }
+        const created = await createVideoGeneration({
+          apiKey: store.settings().apiKey,
+          model: request.model,
+          prompt: request.prompt,
+          duration: request.duration,
+          resolution: request.resolution,
+          aspectRatio: request.aspect_ratio,
+          generateAudio: Boolean(request.generate_audio),
+          inputReferences: refs,
+          signal: state.cinematicController.signal,
+        });
+        state.cinematicResult.videoJob = { ...created, model: request.model };
+        state.cinematicResult.videoError = "";
+        state.cinematicResult.stage = "broll";
+        updateCinematicBrollView();
+        await trackCinematicBroll(state.cinematicResult, updateCinematicBrollView);
+        state.cinematicStage = "complete";
+      } catch (error) {
+        if (error?.name !== "AbortError") state.cinematicResult.videoError = friendlyError(error);
+      } finally {
+        state.cinematicBusy = false;
+        state.cinematicController = null;
+        state.cinematicStage = "";
+        renderCinematic();
+      }
+    })();
+    return;
+  }
+  if (action === "copy-script") {
+    if (!state.cinematicResult?.script) return;
+    await copyText(state.cinematicResult.script);
+    flashCopy(button);
+    toast("Script copied");
+    return;
+  }
+  if (action === "reset") {
+    resetCinematic();
   }
 }
 
@@ -1986,8 +3121,16 @@ function renderEmpty() {
 
 function renderMain() {
   dom.thread.classList.toggle("dashboard-thread", state.dashboard);
+  dom.thread.classList.toggle("cinematic-thread", state.cinematic);
   if (state.dashboard) {
     renderDashboard();
+    updateChrome();
+    state.stick = false;
+    requestAnimationFrame(() => dom.scroll.scrollTo({ top: 0, behavior: "auto" }));
+    return;
+  }
+  if (state.cinematic) {
+    renderCinematic();
     updateChrome();
     state.stick = false;
     requestAnimationFrame(() => dom.scroll.scrollTo({ top: 0, behavior: "auto" }));
@@ -2024,13 +3167,15 @@ function parseRoute() {
 function route() {
   if (state.sending) stopStreaming();
   const dashboard = location.hash === "#/dashboard";
+  const cinematic = location.hash === "#/cinematic";
   state.dashboard = dashboard;
-  const id = dashboard ? null : parseRoute();
-  if (!dashboard && id && store.getConversation(id)) {
+  state.cinematic = cinematic;
+  const id = dashboard || cinematic ? null : parseRoute();
+  if (!dashboard && !cinematic && id && store.getConversation(id)) {
     state.conversationId = id;
   } else {
     state.conversationId = null;
-    if (!dashboard && location.hash !== "#/new") history.replaceState(null, "", "#/new");
+    if (!dashboard && !cinematic && location.hash !== "#/new") history.replaceState(null, "", "#/new");
   }
 
   state.renamingId = null;
@@ -2922,6 +4067,10 @@ function bindEvents() {
     navigate("#/dashboard");
     closeMobileSidebar();
   });
+  dom.cinematicRow?.addEventListener("click", () => {
+    navigate("#/cinematic");
+    closeMobileSidebar();
+  });
   $("#settings-row").addEventListener("click", () => openSettings());
   $("#account-row").addEventListener("click", () => openSettings());
   $("#avatar-btn").addEventListener("click", () => openSettings());
@@ -3178,9 +4327,92 @@ function bindEvents() {
     if (event.target.id === "dash-sample-transcript" && state.dashboardReference) {
       state.dashboardReference.transcript = event.target.value;
     }
+    if (event.target.id === "cine-prompt") {
+      state.cinematicPrompt = event.target.value;
+      const count = $("#cine-prompt-count");
+      if (count) count.textContent = `${event.target.value.length.toLocaleString()} / 32,000`;
+      updateCinematicEstimate();
+    }
+    if (event.target.id === "cine-transcript" && state.cinematicAudio) {
+      state.cinematicAudio.transcript = event.target.value;
+    }
+    if (event.target.id === "cine-speed") {
+      updateCinematicEstimate();
+    }
+    if (event.target.id === "cine-wardrobe-prompt") {
+      state.cinematicWardrobePrompt = event.target.value;
+    }
+    if (event.target.id === "cine-delivery") {
+      state.cinematicDelivery = event.target.value;
+    }
+  });
+
+  dom.thread.addEventListener("change", (event) => {
+    const target = event.target;
+    if (target.id === "cine-script-model") {
+      state.cinematicScriptModel = target.value;
+      updateCinematicEstimate();
+    } else if (target.id === "cine-video-model") {
+      state.cinematicVideoModel = target.value;
+      renderCinematic();
+    } else if (target.id === "cine-speech-model") {
+      state.cinematicSpeechModel = target.value;
+      renderCinematic();
+    } else if (target.id === "cine-wardrobe-model") {
+      state.cinematicWardrobeModel = target.value;
+      void refreshWardrobePricing(true);
+      updateCinematicEstimate();
+    } else if (target.id === "cine-lip-sync") {
+      state.cinematicLipSync = target.checked;
+      updateCinematicEstimate();
+    } else if (["cine-duration", "cine-resolution", "cine-aspect", "cine-voice"].includes(target.id)) {
+      updateCinematicEstimate();
+    }
+  });
+
+  dom.thread.addEventListener("dragover", (event) => {
+    const zone = event.target.closest("[data-cine-drop]");
+    if (!zone) return;
+    event.preventDefault();
+    zone.classList.add("dragover");
+  });
+
+  dom.thread.addEventListener("dragleave", (event) => {
+    const zone = event.target.closest("[data-cine-drop]");
+    zone?.classList.remove("dragover");
+  });
+
+  dom.thread.addEventListener("drop", (event) => {
+    const zone = event.target.closest("[data-cine-drop]");
+    if (!zone) return;
+    event.preventDefault();
+    zone.classList.remove("dragover");
+    if (zone.dataset.cineDrop === "clips" && event.dataTransfer?.files?.length) {
+      addCinematicClips(event.dataTransfer.files);
+    }
+  });
+
+  dom.cinematicClipsInput?.addEventListener("change", () => {
+    addCinematicClips(dom.cinematicClipsInput.files);
+  });
+
+  dom.cinematicAudioInput?.addEventListener("change", () => {
+    applyCinematicAudio(dom.cinematicAudioInput.files?.[0]);
+  });
+
+  dom.cinematicOutfitInput?.addEventListener("change", () => {
+    const file = dom.cinematicOutfitInput.files?.[0];
+    dom.cinematicOutfitInput.value = "";
+    applyCinematicOutfit(file);
   });
 
   dom.thread.addEventListener("click", async (event) => {
+    const cinematicAction = event.target.closest("[data-cine-action]");
+    if (cinematicAction) {
+      await handleCinematicAction(cinematicAction);
+      return;
+    }
+
     const dashboardAction = event.target.closest("[data-dash-action]");
     if (dashboardAction) {
       handleDashboardAction(dashboardAction);
@@ -3393,6 +4625,7 @@ function init() {
   route();
 
   if (!cache || cache.stale) loadModels();
+  else if (!state.imageModels.length) loadImageModels();
 }
 
 init();
