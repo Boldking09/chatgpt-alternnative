@@ -2410,6 +2410,89 @@ input[type="range"] {
   font-size: 10px;
 }
 
+.cine-review-card {
+  padding: 14px;
+  border-color: rgba(255, 190, 99, 0.24);
+  background:
+    radial-gradient(420px 180px at 0% 0%, rgba(255, 190, 99, 0.08), transparent 70%),
+    var(--cine-panel);
+}
+
+.cine-review-step {
+  padding: 3px 8px;
+  border: 1px solid rgba(255, 190, 99, 0.3);
+  border-radius: 999px;
+  color: #ffd9a3;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.cine-compare {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.cine-compare.single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.cine-compare figure {
+  margin: 0;
+}
+
+.cine-compare img {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border: 1px solid var(--cine-border);
+  border-radius: 10px;
+  background: #03050a;
+  object-fit: cover;
+}
+
+.cine-compare figcaption {
+  margin-top: 5px;
+  color: var(--cine-faint);
+  font-size: 10px;
+}
+
+.cine-review-copy {
+  margin: 0 0 10px;
+  color: var(--cine-muted);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+.cine-review-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 10px;
+}
+
+.cine-review-actions .btn {
+  height: 34px;
+  font-size: 11.5px;
+}
+
+.cine-review-card .cine-error {
+  margin-top: 8px;
+}
+
+.cine-broll-review {
+  min-height: 140px;
+}
+
+.cine-broll-review > .icon {
+  width: 20px;
+  height: 20px;
+  color: rgba(255, 190, 99, 0.6);
+}
+
 .cine-cost {
   display: flex;
   flex-direction: column;
@@ -3093,6 +3176,10 @@ input[type="range"] {
   }
 
   .cine-clip-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .cine-compare {
     grid-template-columns: minmax(0, 1fr);
   }
 

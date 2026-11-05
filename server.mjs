@@ -616,37 +616,10 @@ async function handleCinematic(req, res) {
   const speedValue = Number(payload.speed);
   const speed = Number.isFinite(speedValue) && speedValue >= 0.5 && speedValue <= 2 ? speedValue : null;
 
-  let script;
-  try {
-    script = await cinematicScript({ apiKey, req, model: scriptModel, prompt, duration, resolution, aspectRatio: aspectRatio, clips, referenceFrame });
-  } catch (error) {
-    sendJson(res, error.status || 502, { error: { message: error.message || 'Could not write the voiceover script.' } });
-    return;
-  }
-
-  let speech;
-  try {
-    speech = await cinematicSpeech({
-      apiKey,
-      req,
-      model: speechModel,
-      text: script,
-      voice,
-      instructions,
-      speed,
-      audioSample,
-      transcript
-    });
-  } catch (error) {
-    sendJson(res, error.status || 502, { error: { message: error.message || 'Could not generate the voiceover.' } });
-    return;
-  }
-
-  let wardrobe = null;
-  let wardrobeError = '';
-  if (outfitImage) {
-    try {
-      wardrobe = await cinematicWardrobe({
+  // Wardrobe is independent of the narration, so dress the frame while the
+  // script model is still writing. Both settle objects keep failures local.
+  const wardrobePromise = outfitImage
+    ? cinematicWardrobe({
         apiKey,
         req,
         model: wardrobeModel,
@@ -654,10 +627,52 @@ async function handleCinematic(req, res) {
         frame: referenceFrame,
         outfit: outfitImage,
         aspectRatio
-      });
-    } catch (error) {
-      wardrobeError = error.message || 'Could not apply the wardrobe reference.';
-    }
+      }).then(
+        (value) => ({ ok: true, value }),
+        (error) => ({ ok: false, error })
+      )
+    : Promise.resolve({ ok: true, value: null });
+
+  let script;
+  try {
+    script = await cinematicScript({ apiKey, req, model: scriptModel, prompt, duration, resolution, aspectRatio: aspectRatio, clips, referenceFrame });
+  } catch (error) {
+    // The wardrobe request is already in flight; observe it so a late failure
+    // cannot become an unhandled rejection after we return.
+    wardrobePromise.catch(() => {});
+    sendJson(res, error.status || 502, { error: { message: error.message || 'Could not write the voiceover script.' } });
+    return;
+  }
+
+  const speechPromise = cinematicSpeech({
+    apiKey,
+    req,
+    model: speechModel,
+    text: script,
+    voice,
+    instructions,
+    speed,
+    audioSample,
+    transcript
+  }).then(
+    (value) => ({ ok: true, value }),
+    (error) => ({ ok: false, error })
+  );
+
+  const [speechOutcome, wardrobeOutcome] = await Promise.all([speechPromise, wardrobePromise]);
+  if (!speechOutcome.ok) {
+    const error = speechOutcome.error || {};
+    sendJson(res, error.status || 502, { error: { message: error.message || 'Could not generate the voiceover.' } });
+    return;
+  }
+  const speech = speechOutcome.value;
+
+  let wardrobe = null;
+  let wardrobeError = '';
+  if (wardrobeOutcome.ok) {
+    wardrobe = wardrobeOutcome.value;
+  } else {
+    wardrobeError = wardrobeOutcome.error?.message || 'Could not apply the wardrobe reference.';
   }
 
   const videoPrompt = [
@@ -680,30 +695,39 @@ async function handleCinematic(req, res) {
     generate_audio: false
   };
 
-  const videoReferences = [];
   const videoFrame = wardrobe?.dataUrl || referenceFrame;
-  if (videoFrame && (wardrobe || wardrobeError || lipSync)) {
-    videoReferences.push({ type: 'image_url', image_url: { url: videoFrame } });
-  }
-  if (lipSync) {
-    videoReferences.push({
-      type: 'audio_url',
-      audio_url: { url: `data:${speech.contentType};base64,${speech.audio.toString('base64')}` }
-    });
-  }
-  const videoRequestBody = videoReferences.length
-    ? { ...videoRequest, input_references: videoReferences }
-    : videoRequest;
+  const usesImageReference = Boolean(videoFrame) && Boolean(wardrobe || wardrobeError || lipSync);
 
+  // Deferring the video lets the client show a review step before any video
+  // credits are spent. The client starts the job with /api/videos afterwards.
+  const deferVideo = payload.defer_video === true;
   let videoJob = null;
   let videoError = '';
-  try {
-    videoJob = await cinematicVideoJob({ apiKey, req, body: videoRequestBody });
-  } catch (error) {
-    videoError = error.message || 'Could not start the B-roll video.';
+  if (!deferVideo) {
+    // Only assemble the reference payload when the job actually starts; the
+    // lip-sync audio can be several megabytes of base64.
+    const videoReferences = [];
+    if (usesImageReference) {
+      videoReferences.push({ type: 'image_url', image_url: { url: videoFrame } });
+    }
+    if (lipSync) {
+      videoReferences.push({
+        type: 'audio_url',
+        audio_url: { url: `data:${speech.contentType};base64,${speech.audio.toString('base64')}` }
+      });
+    }
+    const videoRequestBody = videoReferences.length
+      ? { ...videoRequest, input_references: videoReferences }
+      : videoRequest;
+    try {
+      videoJob = await cinematicVideoJob({ apiKey, req, body: videoRequestBody });
+    } catch (error) {
+      videoError = error.message || 'Could not start the B-roll video.';
+    }
   }
 
   sendJson(res, 200, {
+    deferred: deferVideo,
     script,
     script_model: scriptModel,
     speech_model: speechModel,
@@ -741,7 +765,6 @@ async function handleCinematic(req, res) {
     } : null,
     lip_sync: lipSync,
     wardrobe_error: wardrobeError,
-    video_references: { image: Boolean(videoFrame) && Boolean(wardrobe || wardrobeError || lipSync), audio: lipSync },
     video_request: videoRequest,
     video_job: videoJob,
     video_error: videoError
@@ -981,6 +1004,95 @@ async function handleSpeech(req, res) {
   res.end(audio);
 }
 
+async function handleWardrobeStill(req, res) {
+  const apiKey = cinematicRequestKey(req);
+  if (!apiKey) {
+    sendJson(res, 401, { error: { message: 'OpenRouter API key is required.' } });
+    return;
+  }
+
+  let payload;
+  try {
+    payload = await readJson(req);
+  } catch (error) {
+    sendJson(res, error.status || 400, { error: { message: error.message || 'Invalid request.' } });
+    return;
+  }
+
+  const model = typeof payload.model === 'string' ? payload.model.trim() : '';
+  if (!model || model.length > 200) {
+    sendJson(res, 400, { error: { message: 'An image model is required.' } });
+    return;
+  }
+
+  let referenceFrame = '';
+  try {
+    referenceFrame = normalizeImageSample(payload.reference_frame, 'Reference frame');
+  } catch (error) {
+    sendJson(res, error.status || 400, { error: { message: error.message } });
+    return;
+  }
+  if (!referenceFrame) {
+    sendJson(res, 400, { error: { message: 'A reference frame is required.' } });
+    return;
+  }
+
+  let outfitImage = '';
+  try {
+    outfitImage = normalizeImageSample(payload.outfit_image, 'Outfit reference');
+  } catch (error) {
+    sendJson(res, error.status || 400, { error: { message: error.message } });
+    return;
+  }
+  if (!outfitImage) {
+    sendJson(res, 400, { error: { message: 'An outfit reference image is required.' } });
+    return;
+  }
+
+  const aspectRatio = typeof payload.aspect_ratio === 'string' && payload.aspect_ratio.trim()
+    ? payload.aspect_ratio.trim()
+    : '16:9';
+  if (!/^\d{1,2}:\d{1,2}$/.test(aspectRatio)) {
+    sendJson(res, 400, { error: { message: 'aspect_ratio must look like 16:9, 9:16, or 1:1.' } });
+    return;
+  }
+
+  const prompt = typeof payload.prompt === 'string' ? payload.prompt.trim() : '';
+  if (prompt.length > maxVideoPromptCharacters) {
+    sendJson(res, 413, { error: { message: `prompt must be ${maxVideoPromptCharacters} characters or fewer.` } });
+    return;
+  }
+  const direction = typeof payload.wardrobe_prompt === 'string' ? payload.wardrobe_prompt.trim() : '';
+  if (direction.length > maxWardrobePromptCharacters) {
+    sendJson(res, 413, { error: { message: `wardrobe_prompt must be ${maxWardrobePromptCharacters} characters or fewer.` } });
+    return;
+  }
+
+  try {
+    const wardrobe = await cinematicWardrobe({
+      apiKey,
+      req,
+      model,
+      prompt: cinematicWardrobePrompt(prompt, direction),
+      frame: referenceFrame,
+      outfit: outfitImage,
+      aspectRatio
+    });
+    sendJson(res, 200, {
+      model,
+      wardrobe: {
+        model,
+        data_url: wardrobe.dataUrl,
+        media_type: wardrobe.mediaType,
+        cost_usd: wardrobe.cost,
+        usage: wardrobe.usage
+      }
+    });
+  } catch (error) {
+    sendJson(res, error.status || 502, { error: { message: error.message || 'Could not apply the wardrobe reference.' } });
+  }
+}
+
 async function sendFile(res, filePath, status = 200) {
   const info = await stat(filePath);
   if (!info.isFile()) throw new Error('not a file');
@@ -998,7 +1110,7 @@ async function sendFile(res, filePath, status = 200) {
 const server = http.createServer(async (req, res) => {
   const urlPath = (req.url || '/').split('?')[0].split('#')[0] || '/';
 
-  if (urlPath === '/api/tts' || urlPath === '/api/videos' || urlPath === '/api/cinematic') {
+  if (urlPath === '/api/tts' || urlPath === '/api/videos' || urlPath === '/api/cinematic' || urlPath === '/api/cinematic/wardrobe') {
     if (req.method === 'OPTIONS') {
       res.writeHead(204, { Allow: 'POST, OPTIONS' });
       res.end();
@@ -1010,6 +1122,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (urlPath === '/api/videos') await handleVideo(req, res);
+    else if (urlPath === '/api/cinematic/wardrobe') await handleWardrobeStill(req, res);
     else if (urlPath === '/api/cinematic') await handleCinematic(req, res);
     else await handleSpeech(req, res);
     return;

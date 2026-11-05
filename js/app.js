@@ -13,6 +13,7 @@ import {
   createVideoGeneration,
   createSpeech,
   createCinematicEdit,
+  createWardrobeStill,
   base64ToBlob,
   speechAudioReference,
   videoAudioReference,
@@ -2334,6 +2335,25 @@ function cinematicPipelineHtml() {
   const analyzing = state.cinematicBusy && state.cinematicStage === "analyzing";
   const brollActive = state.cinematicBusy && Boolean(result) && !result.videoUrl && !result.videoError;
   const brollFailed = Boolean(result?.videoError);
+  const review = Boolean(result?.awaitingReview);
+  const wardrobeRetrying = state.cinematicBusy && state.cinematicStage === "wardrobe";
+  const wardrobeStep = wardrobeRetrying
+    ? { cls: " active", icon: "#i-spark", copy: "Applying the outfit again" }
+    : result?.wardrobe
+    ? {
+        cls: " done",
+        icon: "#i-check",
+        copy: result.wardrobeError ? "Retry failed — using the previous still" : "Outfit applied to the reference frame",
+      }
+    : result?.wardrobeSkipped
+      ? { cls: "", icon: "#i-spark", copy: "Skipped — rendering the original frame" }
+      : result?.wardrobeError
+        ? { cls: " failed", icon: "#i-x", copy: "Swap unavailable — rendering the original frame" }
+        : review
+          ? { cls: " active", icon: "#i-spark", copy: "Ready for your review" }
+          : analyzing
+            ? { cls: " active", icon: "#i-spark", copy: "Dressing the first frame" }
+            : { cls: "", icon: "#i-spark", copy: "Waiting for the voiceover" };
   return `<div class="cine-pipeline" id="cine-pipeline">
     <div class="cine-step${result ? " done" : analyzing ? " active" : ""}">
       <span class="cine-step-icon">${result ? '<svg class="icon"><use href="#i-check"/></svg>' : '<svg class="icon"><use href="#i-film"/></svg>'}</span>
@@ -2343,13 +2363,13 @@ function cinematicPipelineHtml() {
       <span class="cine-step-icon">${result?.audioUrl ? '<svg class="icon"><use href="#i-check"/></svg>' : '<svg class="icon"><use href="#i-wave"/></svg>'}</span>
       <span><strong>Voiceover</strong><small>${result?.audioUrl ? "Cloned voice ready" : analyzing ? "Writing and voicing narration" : "Your audio sample sets the tone"}</small></span>
     </div>
-    ${state.cinematicOutfit || result?.wardrobe ? `<div class="cine-step${result?.wardrobe ? " done" : analyzing ? " active" : ""}">
-      <span class="cine-step-icon">${result?.wardrobe ? '<svg class="icon"><use href="#i-check"/></svg>' : '<svg class="icon"><use href="#i-spark"/></svg>'}</span>
-      <span><strong>Wardrobe</strong><small>${result?.wardrobe ? "Outfit applied to the reference frame" : analyzing ? "Dressing the first frame" : "Waiting for the voiceover"}</small></span>
+    ${state.cinematicOutfit || result?.wardrobe ? `<div class="cine-step${wardrobeStep.cls}">
+      <span class="cine-step-icon"><svg class="icon"><use href="${wardrobeStep.icon}"/></svg></span>
+      <span><strong>Wardrobe</strong><small>${escapeHtml(wardrobeStep.copy)}</small></span>
     </div>` : ""}
-    <div class="cine-step${result?.videoUrl ? " done" : brollFailed ? " failed" : brollActive ? " active" : ""}">
-      <span class="cine-step-icon">${result?.videoUrl ? '<svg class="icon"><use href="#i-check"/></svg>' : '<svg class="icon"><use href="#i-play"/></svg>'}</span>
-      <span><strong>AI B-roll</strong><small>${result?.videoUrl ? "New footage rendered" : brollFailed ? "B-roll unavailable" : brollActive ? VIDEO_STATUS_LABELS[result?.videoJob?.status] || "Starting render" : "Ready after the voiceover"}</small></span>
+    <div class="cine-step${result?.videoUrl ? " done" : brollFailed ? " failed" : brollActive ? " active" : review ? " active" : ""}">
+      <span class="cine-step-icon">${result?.videoUrl ? '<svg class="icon"><use href="#i-check"/></svg>' : '<svg class="icon"><use href="#i-film"/></svg>'}</span>
+      <span><strong>AI B-roll</strong><small>${result?.videoUrl ? "New footage rendered" : brollFailed ? "B-roll unavailable" : brollActive ? VIDEO_STATUS_LABELS[result?.videoJob?.status] || "Starting render" : review ? "Waiting for your review" : "Ready after the voiceover"}</small></span>
     </div>
   </div>`;
 }
@@ -2358,6 +2378,13 @@ function cinematicBrollHtml() {
   const result = state.cinematicResult;
   if (!result) {
     return `<div class="cine-broll-empty"><svg class="icon"><use href="#i-film"/></svg><span>New AI B-roll will appear here</span></div>`;
+  }
+  if (result.awaitingReview) {
+    return `<div class="cine-broll-state cine-broll-review">
+      <svg class="icon"><use href="#i-film"/></svg>
+      <strong>Ready to render</strong>
+      <p>Review the script and wardrobe still, then start B-roll. Video credits are only spent when you render.</p>
+    </div>`;
   }
   if (result.videoUrl) {
     return `<div class="cine-broll-player">
@@ -2384,6 +2411,36 @@ function cinematicBrollHtml() {
   </div>`;
 }
 
+function cinematicReviewHtml(result) {
+  const still = result.wardrobe?.data_url || "";
+  const before = result.referenceFrame || "";
+  const copy = result.wardrobeSkipped
+    ? "Wardrobe skipped — B-roll will render without a wardrobe still."
+    : still
+      ? "Check the outfit held up. Render when you're happy, or retry the still without paying for the voiceover again."
+      : "The script and voiceover are ready. Render B-roll when you're happy with them.";
+  return `<section class="cine-card cine-review-card">
+    <div class="cine-card-head">
+      <div><h3>Review before render</h3><small>No video credits have been spent yet.</small></div>
+      <span class="cine-review-step">Step 1 of 2</span>
+    </div>
+    ${still ? `<div class="cine-compare${before ? "" : " single"}">
+      ${before ? `<figure><img src="${escapeHtml(before)}" alt="Reference frame"><figcaption>Reference frame</figcaption></figure>` : ""}
+      <figure><img src="${escapeHtml(still)}" alt="Wardrobe still"><figcaption>Wardrobe applied</figcaption></figure>
+    </div>` : `<p class="cine-review-copy">${escapeHtml(copy)}</p>`}
+    ${result.wardrobeError ? `<div class="cine-error"><svg class="icon"><use href="#i-x"/></svg><span>Wardrobe swap failed: ${escapeHtml(result.wardrobeError)}</span></div>` : ""}
+    <div class="cine-review-actions">
+      <button type="button" class="btn primary" data-cine-action="render-broll"${state.cinematicBusy ? " disabled" : ""}>
+        <svg class="icon"><use href="#i-film"/></svg><span>Render B-roll</span>
+      </button>
+      ${result.outfitImage ? `<button type="button" class="btn" data-cine-action="retry-wardrobe"${state.cinematicBusy ? " disabled" : ""}>
+        <svg class="icon"><use href="#i-refresh"/></svg><span>Retry wardrobe</span>
+      </button>` : ""}
+      ${still ? `<button type="button" class="btn ghost" data-cine-action="skip-wardrobe"${state.cinematicBusy ? " disabled" : ""}>Render without wardrobe</button>` : ""}
+    </div>
+  </section>`;
+}
+
 function cinematicResultHtml() {
   const result = state.cinematicResult;
   if (!result) {
@@ -2408,7 +2465,8 @@ function cinematicResultHtml() {
   return `<div class="cine-result">
     ${cinematicPipelineHtml()}
     ${result.analysis ? `<p class="cine-analysis"><svg class="icon"><use href="#i-film"/></svg><span>${escapeHtml(cinematicAnalysisLine(result.analysis))}</span></p>` : ""}
-    ${result.wardrobeError ? `<div class="cine-error"><svg class="icon"><use href="#i-x"/></svg><span>Wardrobe swap skipped: ${escapeHtml(result.wardrobeError)}</span></div>` : ""}
+    ${result.awaitingReview ? cinematicReviewHtml(result) : ""}
+    ${result.wardrobeError && !result.awaitingReview ? `<div class="cine-error"><svg class="icon"><use href="#i-x"/></svg><span>Wardrobe swap skipped: ${escapeHtml(result.wardrobeError)}</span></div>` : ""}
     <div class="cine-result-grid">
       <section class="cine-card cine-script-card">
         <div class="cine-card-head">
@@ -2615,9 +2673,12 @@ function renderCinematic() {
   const stageLabels = {
     analyzing: "Writing the script",
     voiceover: "Cloning the voice",
+    wardrobe: "Retrying wardrobe",
     broll: "Rendering B-roll",
   };
-  const status = state.cinematicBusy ? stageLabels[state.cinematicStage] || "Directing" : "Ready to edit";
+  const status = state.cinematicBusy
+    ? stageLabels[state.cinematicStage] || "Directing"
+    : state.cinematicResult?.awaitingReview ? "Review & render" : "Ready to edit";
   dom.thread.innerHTML = `<div class="cinematic">
     <header class="cine-head">
       <div class="cine-title-wrap">
@@ -2678,11 +2739,13 @@ function updateCinematicBusyUi() {
   const labels = {
     analyzing: "Writing the script",
     voiceover: "Cloning the voice",
+    wardrobe: "Retrying wardrobe",
     broll: "Rendering B-roll",
   };
   if (pill) {
     pill.classList.toggle("busy", state.cinematicBusy);
-    pill.innerHTML = `<span class="cine-live-dot"></span>${escapeHtml(state.cinematicBusy ? labels[state.cinematicStage] || "Directing" : "Ready to edit")}`;
+    const idle = state.cinematicResult?.awaitingReview ? "Review & render" : "Ready to edit";
+    pill.innerHTML = `<span class="cine-live-dot"></span>${escapeHtml(state.cinematicBusy ? labels[state.cinematicStage] || "Directing" : idle)}`;
   }
   if (button) {
     button.disabled = state.cinematicBusy;
@@ -2732,6 +2795,128 @@ async function trackCinematicBroll(result, onUpdate) {
   result.videoError = "";
   result.stage = "complete";
   onUpdate?.();
+}
+
+function cinematicReferenceList(result) {
+  if (!result) return [];
+  const refs = [];
+  const still = result.wardrobe?.data_url
+    || ((result.wardrobeError || result.wardrobeSkipped || result.lipSync) ? result.referenceFrame : "");
+  if (still) {
+    const image = videoImageReference(still);
+    if (image) refs.push(image);
+  }
+  if (result.lipSync && result.audioData) {
+    const audio = videoAudioReference(`data:${result.audioMime || "audio/mpeg"};base64,${result.audioData}`);
+    if (audio) refs.push(audio);
+  }
+  return refs;
+}
+
+async function startCinematicBroll(result = state.cinematicResult) {
+  if (!result || state.cinematicBusy) return;
+  const request = result.videoRequest;
+  if (!request) {
+    toast("Regenerate the edit to start B-roll.");
+    return;
+  }
+
+  result.awaitingReview = false;
+  result.videoJob = null;
+  result.videoError = "";
+  result.stage = "broll";
+  state.cinematicBusy = true;
+  state.cinematicStage = "broll";
+  state.cinematicError = "";
+  state.cinematicController = new AbortController();
+  updateCinematicBusyUi();
+  renderCinematic();
+
+  try {
+    const created = await createVideoGeneration({
+      apiKey: store.settings().apiKey,
+      model: request.model,
+      prompt: request.prompt,
+      duration: request.duration,
+      resolution: request.resolution,
+      aspectRatio: request.aspect_ratio,
+      generateAudio: Boolean(request.generate_audio),
+      inputReferences: cinematicReferenceList(result),
+      signal: state.cinematicController.signal,
+    });
+    result.videoJob = { ...created, model: request.model };
+    result.videoError = "";
+    updateCinematicBrollView();
+    await trackCinematicBroll(result, updateCinematicBrollView);
+    state.cinematicStage = "complete";
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      state.cinematicError = "Generation stopped.";
+    } else {
+      result.videoError = friendlyError(error);
+    }
+  } finally {
+    state.cinematicBusy = false;
+    state.cinematicController = null;
+    state.cinematicStage = "";
+    renderCinematic();
+  }
+}
+
+async function retryCinematicWardrobe() {
+  const result = state.cinematicResult;
+  if (!result || state.cinematicBusy) return;
+  if (!result.outfitImage) {
+    toast("Add an outfit image first.");
+    return;
+  }
+  if (!result.referenceFrame) {
+    toast("A reference frame is required for a wardrobe swap.");
+    return;
+  }
+
+  state.cinematicBusy = true;
+  state.cinematicStage = "wardrobe";
+  state.cinematicError = "";
+  state.cinematicController = new AbortController();
+  updateCinematicBusyUi();
+  renderCinematic();
+
+  try {
+    const wardrobe = await createWardrobeStill({
+      apiKey: store.settings().apiKey,
+      model: result.wardrobeModel,
+      prompt: result.prompt,
+      wardrobePrompt: result.wardrobePrompt,
+      referenceFrame: result.referenceFrame,
+      outfitImage: result.outfitImage,
+      aspectRatio: result.aspectRatio,
+      signal: state.cinematicController.signal,
+    });
+    result.wardrobe = wardrobe;
+    result.wardrobeError = "";
+    result.wardrobeSkipped = false;
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      state.cinematicError = "Wardrobe retry stopped.";
+    } else {
+      result.wardrobeError = friendlyError(error);
+    }
+  } finally {
+    state.cinematicBusy = false;
+    state.cinematicController = null;
+    state.cinematicStage = "";
+    renderCinematic();
+  }
+}
+
+function skipCinematicWardrobe() {
+  const result = state.cinematicResult;
+  if (!result) return;
+  result.wardrobe = null;
+  result.wardrobeError = "";
+  result.wardrobeSkipped = true;
+  renderCinematic();
 }
 
 async function runCinematicEdit() {
@@ -2824,6 +3009,7 @@ async function runCinematicEdit() {
       voice,
       instructions: state.cinematicDelivery,
       speed,
+      deferVideo: true,
       signal: state.cinematicController.signal,
     });
 
@@ -2841,8 +3027,14 @@ async function runCinematicEdit() {
       audioMime: audioType,
       audioData,
       referenceFrame,
+      prompt,
+      aspectRatio: options.aspectRatio,
+      outfitImage,
+      wardrobeModel: state.cinematicOutfit ? data.wardrobeModel?.id || "" : "",
+      wardrobePrompt: state.cinematicWardrobePrompt,
       wardrobe: payload?.wardrobe || null,
       wardrobeError: String(payload?.wardrobe_error || "").trim(),
+      wardrobeSkipped: false,
       lipSync: Boolean(payload?.lip_sync),
       scriptModel: payload?.script_model || data.scriptModel.id,
       speechModel: payload?.speech_model || data.speechModel.id,
@@ -2851,23 +3043,12 @@ async function runCinematicEdit() {
       videoJob: payload?.video_job || null,
       videoUrl: "",
       videoError: String(payload?.video_error || "").trim(),
-      stage: payload?.video_job ? "broll" : "complete",
+      awaitingReview: true,
+      stage: "review",
     };
-    state.cinematicStage = state.cinematicResult.videoJob ? "broll" : "complete";
+    state.cinematicStage = "review";
     renderCinematic();
     updateCinematicBusyUi();
-
-    if (state.cinematicResult.videoJob && !state.cinematicResult.videoError) {
-      try {
-        await trackCinematicBroll(state.cinematicResult, updateCinematicBrollView);
-        state.cinematicStage = "complete";
-      } catch (error) {
-        if (error?.name === "AbortError") throw error;
-        state.cinematicResult.videoError = friendlyError(error);
-        state.cinematicStage = "complete";
-        updateCinematicBrollView();
-      }
-    }
   } catch (error) {
     if (error?.name === "AbortError") {
       state.cinematicError = "Generation stopped.";
@@ -3005,62 +3186,16 @@ async function handleCinematicAction(button) {
     stopCinematic();
     return;
   }
-  if (action === "retry-broll") {
-    const request = state.cinematicResult?.videoRequest;
-    if (!request) {
-      toast("Regenerate the edit to retry B-roll.");
-      return;
-    }
-    if (!state.cinematicResult.videoUrl && state.cinematicResult.videoJob?.id) {
-      state.cinematicResult.videoJob = null;
-    }
-    state.cinematicBusy = true;
-    state.cinematicController = new AbortController();
-    state.cinematicStage = "broll";
-    state.cinematicError = "";
-    updateCinematicBusyUi();
-    updateCinematicBrollView();
-    void (async () => {
-      try {
-        const refs = [];
-        const swapped = state.cinematicResult.wardrobe?.data_url;
-        if (swapped) {
-          const image = videoImageReference(swapped);
-          if (image) refs.push(image);
-        } else if (state.cinematicResult.lipSync && state.cinematicResult.referenceFrame) {
-          const image = videoImageReference(state.cinematicResult.referenceFrame);
-          if (image) refs.push(image);
-        }
-        if (state.cinematicResult.lipSync && state.cinematicResult.audioData) {
-          const audio = videoAudioReference(`data:${state.cinematicResult.audioMime || "audio/mpeg"};base64,${state.cinematicResult.audioData}`);
-          if (audio) refs.push(audio);
-        }
-        const created = await createVideoGeneration({
-          apiKey: store.settings().apiKey,
-          model: request.model,
-          prompt: request.prompt,
-          duration: request.duration,
-          resolution: request.resolution,
-          aspectRatio: request.aspect_ratio,
-          generateAudio: Boolean(request.generate_audio),
-          inputReferences: refs,
-          signal: state.cinematicController.signal,
-        });
-        state.cinematicResult.videoJob = { ...created, model: request.model };
-        state.cinematicResult.videoError = "";
-        state.cinematicResult.stage = "broll";
-        updateCinematicBrollView();
-        await trackCinematicBroll(state.cinematicResult, updateCinematicBrollView);
-        state.cinematicStage = "complete";
-      } catch (error) {
-        if (error?.name !== "AbortError") state.cinematicResult.videoError = friendlyError(error);
-      } finally {
-        state.cinematicBusy = false;
-        state.cinematicController = null;
-        state.cinematicStage = "";
-        renderCinematic();
-      }
-    })();
+  if (action === "render-broll" || action === "retry-broll") {
+    void startCinematicBroll();
+    return;
+  }
+  if (action === "retry-wardrobe") {
+    void retryCinematicWardrobe();
+    return;
+  }
+  if (action === "skip-wardrobe") {
+    skipCinematicWardrobe();
     return;
   }
   if (action === "copy-script") {

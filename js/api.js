@@ -7,6 +7,7 @@ const VIDEO_URL = "/api/videos";
 const VIDEO_JOB_URL = `${BASE}/videos`;
 const SPEECH_URL = "/api/tts";
 const CINEMATIC_URL = "/api/cinematic";
+const CINEMATIC_WARDROBE_URL = "/api/cinematic/wardrobe";
 const SPEECH_MODELS_URL = `${MODELS_URL}?output_modalities=speech`;
 const VIDEO_TERMINAL = new Set(["completed", "failed", "cancelled", "expired"]);
 
@@ -842,6 +843,7 @@ export async function createCinematicEdit({
   voice,
   instructions,
   speed,
+  deferVideo = false,
   signal,
 }) {
   const body = {
@@ -855,6 +857,7 @@ export async function createCinematicEdit({
     clips,
     audio_sample: audioSample,
   };
+  if (deferVideo) body.defer_video = true;
   if (referenceFrame) body.reference_frame = referenceFrame;
   if (wardrobeModel) body.wardrobe_model = wardrobeModel;
   if (outfitImage) body.outfit_image = outfitImage;
@@ -891,6 +894,50 @@ export async function createCinematicEdit({
   }
   if (!payload?.audio?.data) throw new Error("The studio service returned no voiceover audio.");
   return payload;
+}
+
+export async function createWardrobeStill({
+  apiKey,
+  model,
+  prompt,
+  wardrobePrompt,
+  referenceFrame,
+  outfitImage,
+  aspectRatio,
+  signal,
+}) {
+  const body = {
+    model,
+    reference_frame: referenceFrame,
+    outfit_image: outfitImage,
+    aspect_ratio: aspectRatio,
+  };
+  const brief = String(prompt || "").trim();
+  if (brief) body.prompt = brief;
+  const styling = String(wardrobePrompt || "").trim();
+  if (styling) body.wardrobe_prompt = styling;
+
+  let response;
+  try {
+    response = await fetch(CINEMATIC_WARDROBE_URL, {
+      method: "POST",
+      headers: headers(apiKey),
+      body: JSON.stringify(body),
+      signal,
+    });
+  } catch (error) {
+    if (error.name === "AbortError") throw error;
+    throw new Error(`Network error — ${error.message || "could not reach the wardrobe service"}.`);
+  }
+  if (!response.ok) throw new Error(await errorMessage(response));
+  const payload = await response.json();
+  if (payload?.error) {
+    throw new Error(payload.error.message || payload.error || "The wardrobe service returned an error.");
+  }
+  if (!payload?.wardrobe?.data_url) {
+    throw new Error("The wardrobe service returned no still.");
+  }
+  return payload.wardrobe;
 }
 
 export async function createSpeech({
